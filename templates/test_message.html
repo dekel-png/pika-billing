@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}בדיקת ערוץ הודעות — {{ APP_NAME }}{% endblock %}
+{% block content %}
+<div class="card" style="max-width:520px; margin:30px auto 0">
+  <h2>בדיקת ערוץ הודעות (אדמין)</h2>
+  <p class="note" style="margin-bottom:14px">
+    ערוץ פעיל: <b>{% if channel == 'inforu' %}SMS (InforU){% elif channel == 'whatsapp' %}וואטסאפ (Green API){% else %}כבוי (dry) — הודעות לא נשלחות{% endif %}</b>.
+    נשלחת הודעת בדיקה אחת למספר שתקליד — בלי שום קשר לחיובים.
+  </p>
+  {% if result %}<div class="ok-box">✓ {{ result }}</div>{% endif %}
+  {% if error %}<div class="error-box">{{ error }}</div>{% endif %}
+  <form method="post">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <div class="field">
+      <label>מספר נייד לבדיקה</label>
+      <input type="tel" name="phone" placeholder="05X-XXXXXXX" autocomplete="off"
+             style="width:100%; padding:11px 13px; font-size:15px; border:1.5px solid var(--line); border-radius:9px; font-family:inherit" required>
+    </div>
+    <button class="btn" type="submit">שלח הודעת בדיקה</button>
+    <a class="btn secondary" href="{{ url_for('dashboard') }}" style="margin-inline-start:8px">חזרה</a>
+  </form>
+</div>
+{% endblock %}

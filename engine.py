@@ -357,8 +357,12 @@ def send_message(phone: str, text: str) -> str:
         token = os.getenv("GREEN_API_BOT_TOKEN", "").strip()
         if not inst or not token:
             raise RuntimeError("חסרים GREEN_API_BOT_INSTANCE_ID/_TOKEN")
+        # אינסטנסים חדשים של Green API מחייבים סאב-דומיין פר-אינסטנס (7107.api...)
+        default_host = (f"https://{inst[:4]}.api.green-api.com"
+                        if inst[:4].isdigit() else "https://api.green-api.com")
+        host = os.getenv("GREEN_API_HOST", default_host).rstrip("/")
         r = requests.post(
-            f"https://api.green-api.com/waInstance{inst}/sendMessage/{token}",
+            f"{host}/waInstance{inst}/sendMessage/{token}",
             json={"chatId": f"{phone}@c.us", "message": text}, timeout=30)
         r.raise_for_status()
         return "וואטסאפ"

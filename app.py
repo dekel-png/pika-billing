@@ -342,6 +342,32 @@ def run_status(run_id):
                     "error": state.error})
 
 
+@app.route("/test-message", methods=["GET", "POST"])
+def test_message():
+    """אדמין בלבד: שליחת הודעת בדיקה אחת למספר שמוקלד — אימות ערוץ בלי חיובים."""
+    if (r := require_login()):
+        return r
+    if session.get("role") != "admin":
+        abort(403)
+    result, error = "", ""
+    if request.method == "POST":
+        check_csrf()
+        phone, perr = engine.normalize_phone(request.form.get("phone", ""))
+        if perr:
+            error = perr
+        else:
+            try:
+                how = engine.send_message(
+                    phone,
+                    "הודעת בדיקה ממערכת החיובים של ג.ד. פיקה — הערוץ עובד ✓\n"
+                    "Test message from G.D. Pika billing system — channel OK ✓")
+                result = f"נשלח בהצלחה ({how}) אל 0{phone[3:]}"
+            except Exception as e:
+                error = f"השליחה נכשלה: {str(e)[:250]}"
+    return render_template("test_message.html", result=result, error=error,
+                           channel=engine.channel())
+
+
 @app.get("/report/<run_id>")
 def report(run_id):
     if (r := require_login()):

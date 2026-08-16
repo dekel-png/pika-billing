@@ -49,6 +49,14 @@
   <p class="note" style="margin-top:10px">שום חשבונית לא מופקת בשלב הזה — קודם רואים הכול.</p>
 </div>
 
+{% if role == 'admin' %}
+<div class="card">
+  <h2>כלי אדמין</h2>
+  <p class="note">אימות ערוץ ההודעות בלי לגעת בחיובים — שליחת הודעת בדיקה אחת למספר שלך.</p>
+  <p style="margin-top:10px"><a class="btn secondary" href="{{ url_for('test_message') }}">📨 בדיקת ערוץ הודעות</a></p>
+</div>
+{% endif %}
+
 {% if runs %}
 <div class="card">
   <h2>ריצות אחרונות</h2>
