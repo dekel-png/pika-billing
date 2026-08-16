@@ -57,9 +57,15 @@ def channel() -> str:
 
 
 COLUMN_ALIASES = {
-    "name":   ["שם", "שם עובד", "שם העובד", "שם הלקוח", "לקוח", "עובד", "name", "worker", "customer"],
-    "phone":  ["טלפון", "מספר טלפון", "נייד", "מס טלפון", "מס' טלפון", "phone", "mobile"],
+    "passport": ["מספר דרכון", "דרכון", "passport_number", "passport", "passport no",
+                 "passport_no", "passport number"],
+    "name":   ["שם מלא", "שם", "שם עובד", "שם העובד", "שם הלקוח", "לקוח", "עובד",
+               "full_name", "full name", "name", "worker", "customer"],
+    "phone":  ["מספר טלפון", "טלפון", "נייד", "מס טלפון", "מס' טלפון",
+               "phone_number", "phone number", "phone", "mobile"],
     "amount": ["סכום", "מחיר", "סכום חיוב", "סכום לחיוב", "amount", "price"],
+    "gmt":    ["מספר חשבון gmt", "חשבון gmt", "gmt_account_number", "gmt_account",
+               "gmt account", "gmt", "מספר ארנק gmt", "ארנק gmt"],
 }
 
 
@@ -99,18 +105,31 @@ def map_columns(header):
             if alias.lower() in lower:
                 mapping[fieldname] = lower.index(alias.lower())
                 break
-    missing = [f for f in ("name", "phone", "amount") if f not in mapping]
+    missing = [f for f in ("passport", "name", "phone", "amount", "gmt") if f not in mapping]
     if missing:
-        heb = {"name": "שם", "phone": "טלפון", "amount": "סכום"}
+        heb = {"passport": "מספר דרכון", "name": "שם מלא", "phone": "מספר טלפון",
+               "amount": "סכום", "gmt": "מספר חשבון GMT"}
         raise ValueError(
             f"חסרות עמודות בקובץ: {', '.join(heb[m] for m in missing)}. "
             f"נמצאו הכותרות: {', '.join(h for h in header if h)}. "
-            f"בטמפלט צריך: שם, טלפון, סכום")
+            f"בטמפלט צריך: מספר דרכון, שם מלא, מספר טלפון, סכום, מספר חשבון GMT")
     return mapping
 
 
 def normalize_phone(raw):
-    s = re.sub(r"[\s\-().]", "", str(raw or ""))
+    # תא מספרי מאקסל (openpyxl מחזיר float/int) — המרה מדויקת בלי לאבד ספרות
+    if isinstance(raw, float) and raw.is_integer():
+        raw = str(int(raw))
+    elif isinstance(raw, int):
+        raw = str(raw)
+    s = str(raw or "").strip()
+    # "5.01E+08" ב-CSV = אקסל דרס את המספר; הספרות האמיתיות אבדו — אין שחזור
+    if re.fullmatch(r"\d+(\.\d+)?[eE][+\-]?\d+", s):
+        return None, (f"המספר נשמר באקסל בפורמט מדעי ({raw}) והספרות אבדו — "
+                      f"יש להגדיר את עמודת הטלפון כטקסט (Text) ולמלא מחדש")
+    if s.endswith(".0"):
+        s = s[:-2]
+    s = re.sub(r"[\s\-().]", "", s)
     if s.startswith("+"):
         s = s[1:]
     if s.startswith("00972"):
@@ -141,29 +160,56 @@ def parse_amount(raw):
     return val, None
 
 
+def _clean_id(raw) -> str:
+    """דרכון / חשבון GMT: תא מספרי מאקסל → מחרוזת מדויקת; רווחים החוצה."""
+    if isinstance(raw, float) and raw.is_integer():
+        raw = str(int(raw))
+    elif isinstance(raw, int):
+        raw = str(raw)
+    s = str(raw or "").strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    return re.sub(r"\s+", "", s)
+
+
 def load_charges(blob: bytes, filename: str):
     """מחזיר (רשימת שורות תקינות, רשימת שגיאות)."""
     header, raw_rows = read_rows_from_bytes(blob, filename)
     cols = map_columns(header)
-    good, bad, seen = [], [], {}
+    good, bad, seen_phone, seen_pass = [], [], {}, {}
     for i, r in enumerate(raw_rows, start=2):
         def cell(f):
             idx = cols[f]
             return r[idx] if idx < len(r) else None
+        passport = _clean_id(cell("passport"))
         name = str(cell("name") or "").strip()
         phone, perr = normalize_phone(cell("phone"))
         amount, aerr = parse_amount(cell("amount"))
+        gmt = _clean_id(cell("gmt"))
         problems = [e for e in (perr, aerr) if e]
         if not name:
             problems.append("שם חסר")
-        if phone and phone in seen:
-            problems.append(f"טלפון כפול בקובץ (שורה {seen[phone]})")
+        if not passport:
+            problems.append("מספר דרכון חסר")
+        elif re.fullmatch(r"\d+(\.\d+)?[eE][+\-]?\d+", str(cell("passport") or "").strip()):
+            problems.append("מספר הדרכון נשמר בפורמט מדעי — להגדיר את העמודה כטקסט")
+        if not gmt:
+            problems.append("מספר חשבון GMT חסר")
+        if passport and passport in seen_pass:
+            problems.append(f"דרכון כפול בקובץ (שורה {seen_pass[passport]})")
+        if phone and phone in seen_phone:
+            problems.append(f"טלפון כפול בקובץ (שורה {seen_phone[phone]})")
+        # רישום גם לשורות פסולות — כפילות מול שורה שגויה עדיין דורשת בדיקה אנושית
+        if passport and passport not in seen_pass:
+            seen_pass[passport] = i
+        if phone and phone not in seen_phone:
+            seen_phone[phone] = i
         if problems:
-            bad.append({"line": i, "name": name, "raw_phone": str(cell("phone") or ""),
-                        "problems": problems})
+            bad.append({"line": i, "name": name, "passport": passport,
+                        "raw_phone": str(cell("phone") or ""), "problems": problems})
         else:
-            seen[phone] = i
-            good.append({"line": i, "name": name, "phone": phone, "amount": amount})
+            good.append({"line": i, "passport": passport, "name": name,
+                         "phone": phone, "amount": amount, "gmt": gmt})
     return good, bad
 
 
@@ -207,10 +253,11 @@ def month_bounds_dates(month: str):
     return f"{y}-{m:02d}-01", f"{y}-{m:02d}-{last:02d}"
 
 
-def gi_billed_phones(headers, month: str) -> set:
-    """כל הטלפונים שכבר קיבלו מסמך (DOC_TYPE) החודש — מקור האמת למניעת כפל."""
+def gi_billed(headers, month: str) -> tuple[set, set]:
+    """(טלפונים, דרכונים) שכבר קיבלו מסמך החודש — מקור האמת למניעת כפל.
+    הדרכון מחולץ מהערות המסמך ("דרכון: X") — fail-open אם לא נמצא."""
     frm, to = month_bounds_dates(month)
-    phones, page = set(), 1
+    phones, passports, page = set(), set(), 1
     while page <= 40:
         r = requests.post(f"{GI_BASE}/documents/search", headers=headers,
                           json={"fromDate": frm, "toDate": to, "type": [DOC_TYPE],
@@ -223,10 +270,18 @@ def gi_billed_phones(headers, month: str) -> set:
             norm, _ = normalize_phone(raw)
             if norm:
                 phones.add(norm)
+            m = re.search(r"דרכון:\s*(\S+)", str(it.get("remarks") or ""))
+            if m:
+                passports.add(m.group(1))
         if len(items) < 100:
             break
         page += 1
-    return phones
+    return phones, passports
+
+
+def gi_billed_phones(headers, month: str) -> set:
+    """תאימות לאחור — הטלפונים בלבד."""
+    return gi_billed(headers, month)[0]
 
 
 def split_vat(amount: float):
@@ -254,12 +309,16 @@ def _extract_url(body):
 def gi_create_doc(headers, row: dict, month: str):
     price, vat_type, total = split_vat(row["amount"])
     today = (datetime.now(IL_TZ) if IL_TZ else datetime.now()).date().isoformat()
+    # הקבלה מכילה במפורש: דרכון, טלפון וחשבון GMT (בהערות המסמך המודפסות)
+    remarks = (f"{DOC_REMARKS}\n"
+               f"דרכון: {row.get('passport', '')} · טלפון: 0{row['phone'][3:]}"
+               + (f" · חשבון GMT: {row.get('gmt', '')}" if row.get("gmt") else ""))
     payload = {
         "type": DOC_TYPE,
         "date": today,
         "lang": "he",
         "currency": "ILS",
-        "remarks": DOC_REMARKS,
+        "remarks": remarks,
         "signed": True,
         "rounding": False,
         "client": {"name": row["name"], "phone": "0" + row["phone"][3:], "add": True},
@@ -358,10 +417,10 @@ def execute_run(state: RunState, rows: list[dict], month: str, limit: int = 0):
     try:
         headers = gi_token()
         gi_verify_business(headers)
-        billed = gi_billed_phones(headers, month)
+        billed_phones, billed_passports = gi_billed(headers, month)
         todo = []
         for r in rows:
-            if r["phone"] in billed:
+            if r["phone"] in billed_phones or (r.get("passport") and r["passport"] in billed_passports):
                 state.skipped.append({**r, "reason": "כבר קיבל מסמך החודש (לפי חשבונית ירוקה)"})
             else:
                 todo.append(r)
@@ -371,7 +430,9 @@ def execute_run(state: RunState, rows: list[dict], month: str, limit: int = 0):
             todo = todo[:limit]
         state.total = len(todo)
         for r in todo:
-            item = {"name": r["name"], "phone": "0" + r["phone"][3:], "amount": r["amount"],
+            item = {"passport": r.get("passport", ""), "name": r["name"],
+                    "phone": "0" + r["phone"][3:], "amount": r["amount"],
+                    "gmt": r.get("gmt", ""),
                     "ok": False, "doc_number": "", "doc_url": "", "delivery": "", "error": ""}
             try:
                 doc_id, doc_num, url = gi_create_doc(headers, r, month)

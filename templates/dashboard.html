@@ -15,12 +15,21 @@
 <div class="card">
   <h2>איך זה עובד</h2>
   <div class="steps">
-    <div class="step"><b>1 · טמפלט</b>מורידים את הקובץ וממלאים: שם, טלפון, סכום (בש"ח, כולל מע"מ)</div>
+    <div class="step"><b>1 · טמפלט</b>מורידים את הקובץ וממלאים 5 עמודות: מספר דרכון · שם מלא · מספר טלפון · סכום (בש"ח, כולל מע"מ) · מספר חשבון GMT</div>
     <div class="step"><b>2 · העלאה</b>מעלים את הקובץ — המערכת בודקת כל שורה ומראה תצוגה מקדימה</div>
     <div class="step"><b>3 · אישור</b>רק אחרי אישור מפורש מופקות חשבוניות בחשבונית ירוקה{% if channel != 'dry' %} ונשלחת הודעה ללקוח{% endif %}</div>
   </div>
-  <p class="note">מי שכבר קיבל חשבונית החודש מדולג אוטומטית — אי אפשר לחייב פעמיים.</p>
-  <p style="margin-top:12px"><a class="btn secondary" href="{{ url_for('template_csv') }}">⬇ הורדת טמפלט (CSV)</a></p>
+  <p class="note">מי שכבר קיבל חשבונית החודש מדולג אוטומטית — אי אפשר לחייב פעמיים.
+     הקבלה כוללת את מספר הדרכון, הטלפון וחשבון ה-GMT של העובד.</p>
+  <div class="error-box" style="background:#fbf3e2;border-color:#e8d5a8;color:#8a6a1f;margin-top:12px">
+    💡 <b>עובדים באקסל?</b> יש להגדיר את עמודות <b>מספר הטלפון, הדרכון וחשבון ה-GMT כטקסט (Text)</b>
+    לפני המילוי — אחרת אקסל מוחק את האפס המוביל (0501… הופך ל-501…) או הופך את המספר
+    ל-5.01E+08 והספרות אובדות. בטמפלט האקסל שלמטה העמודות כבר מוגדרות נכון.
+  </div>
+  <p style="margin-top:12px">
+    <a class="btn secondary" href="{{ url_for('template_xlsx') }}">⬇ טמפלט Excel (מומלץ — מוגדר נכון מראש)</a>
+    <a class="btn secondary" href="{{ url_for('template_csv') }}" style="margin-inline-start:8px">⬇ טמפלט CSV</a>
+  </p>
 </div>
 
 <div class="card">

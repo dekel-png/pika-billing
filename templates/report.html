@@ -19,9 +19,10 @@
 <div class="card">
   <h2>פירוט</h2>
   <table>
-    <tr><th>שם</th><th>טלפון</th><th>סכום</th><th>מסמך</th><th>הודעה</th><th>סטטוס</th></tr>
+    <tr><th>דרכון</th><th>שם</th><th>טלפון</th><th>סכום</th><th>מסמך</th><th>הודעה</th><th>סטטוס</th></tr>
     {% for r in state.results %}
     <tr>
+      <td>{{ r.passport }}</td>
       <td>{{ r.name }}</td><td>{{ r.phone }}</td><td>{{ '%.2f'|format(r.amount) }} ₪</td>
       <td>{% if r.doc_url %}<a href="{{ r.doc_url }}" target="_blank" rel="noopener">{{ r.doc_number }}</a>
           {% else %}{{ r.doc_number }}{% endif %}</td>
@@ -38,9 +39,9 @@
 <div class="card">
   <h2>דולגו</h2>
   <table>
-    <tr><th>שם</th><th>טלפון</th><th>סיבה</th></tr>
+    <tr><th>דרכון</th><th>שם</th><th>טלפון</th><th>סיבה</th></tr>
     {% for s in state.skipped %}
-    <tr><td>{{ s.name }}</td><td>0{{ s.phone[3:] }}</td><td>{{ s.reason }}</td></tr>
+    <tr><td>{{ s.passport }}</td><td>{{ s.name }}</td><td>0{{ s.phone[3:] }}</td><td>{{ s.reason }}</td></tr>
     {% endfor %}
   </table>
 </div>

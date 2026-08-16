@@ -181,19 +181,60 @@ def dashboard():
                            runs=runs, role=session.get("role"))
 
 
+TEMPLATE_HEADERS = ["מספר דרכון", "שם מלא", "מספר טלפון", "סכום", "מספר חשבון GMT"]
+TEMPLATE_ROWS = [
+    ["N1234567", "Somchai Prasert", "0501234567", "55", "100200300"],
+    ["EB0891011", "Ivan Petrov", "052-2345678", "60.5", "100200301"],
+]
+
+
 @app.get("/template.csv")
 def template_csv():
     if (r := require_login()):
         return r
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["שם", "טלפון", "סכום"])
-    w.writerow(["Somchai Prasert", "0501234567", "55"])
-    w.writerow(["Ivan Petrov", "052-2345678", "60.5"])
+    w.writerow(TEMPLATE_HEADERS)
+    for row in TEMPLATE_ROWS:
+        w.writerow(row)
     data = "﻿" + buf.getvalue()
     return Response(data, mimetype="text/csv",
                     headers={"Content-Disposition":
                              "attachment; filename=charges-template.csv"})
+
+
+@app.get("/template.xlsx")
+def template_xlsx():
+    """טמפלט אקסל שבו עמודות הטלפון/דרכון/GMT כבר מוגדרות כטקסט —
+    האפס המוביל שורד ואין 5.01E+08."""
+    if (r := require_login()):
+        return r
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "חיובים"
+    ws.sheet_view.rightToLeft = True
+    ws.append(TEMPLATE_HEADERS)
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="12263A")
+    text_cols = (1, 3, 5)   # דרכון, טלפון, GMT — טקסט מפורש
+    for row in TEMPLATE_ROWS:
+        ws.append(row)
+    for col_idx in text_cols:
+        for row_idx in range(1, 201):    # גם שורות עתידיות שימולאו בקובץ
+            ws.cell(row=row_idx, column=col_idx).number_format = "@"
+    widths = [16, 24, 16, 10, 20]
+    for i, wdt in enumerate(widths, 1):
+        ws.column_dimensions[chr(64 + i)].width = wdt
+    out = io.BytesIO()
+    wb.save(out)
+    out.seek(0)
+    return Response(out.read(),
+                    mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition":
+                             "attachment; filename=charges-template.xlsx"})
 
 
 @app.post("/upload")
