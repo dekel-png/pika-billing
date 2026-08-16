@@ -51,6 +51,16 @@ MESSAGE_TEMPLATE = os.getenv("MESSAGE_TEMPLATE",
     "Hello {name}, your account was charged {amount} ILS for your mobile line "
     "({month}). Your document: {link}\nG.D. Pika Holdings")
 
+# ל-SMS: הודעה קומפקטית באנגלית (עברית כופה קידוד UCS-2 — 70 תווים למקטע במקום
+# 160 — והתבנית המלאה הייתה עולה ~5 מקטעים בתשלום לכל עובד)
+SMS_MESSAGE_TEMPLATE = os.getenv("SMS_MESSAGE_TEMPLATE",
+    "G.D. Pika: {name}, your mobile line receipt for {month} ({amount} ILS): {link}")
+
+
+def build_message(name: str, amount, month: str, link: str) -> str:
+    tpl = SMS_MESSAGE_TEMPLATE if channel() == "inforu" else MESSAGE_TEMPLATE
+    return tpl.format(name=name, amount=amount, month=month, link=link)
+
 # ערוץ שליחה: dry (בלי הודעות) | inforu (SMS) | whatsapp (Green API)
 def channel() -> str:
     return os.getenv("SEND_CHANNEL", "dry").strip().lower()
@@ -442,8 +452,8 @@ def execute_run(state: RunState, rows: list[dict], month: str, limit: int = 0):
                 doc_id, doc_num, url = gi_create_doc(headers, r, month)
                 item["doc_number"] = doc_num or doc_id
                 item["doc_url"] = url
-                msg = MESSAGE_TEMPLATE.format(name=r["name"], amount=f"{r['amount']:g}",
-                                              month=month, link=url or "(הקישור יישלח בנפרד)")
+                msg = build_message(r["name"], f"{r['amount']:g}", month,
+                                    url or "(link will follow)")
                 try:
                     item["delivery"] = send_message(r["phone"], msg)
                 except Exception as se:
