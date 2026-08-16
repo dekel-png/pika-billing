@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}דוח ריצה — {{ APP_NAME }}{% endblock %}
+{% block content %}
+
+{% if state.status == 'failed' %}
+<div class="error-box">הריצה נעצרה: {{ state.error }}</div>
+{% else %}
+<div class="ok-box">✓ הריצה הושלמה · חודש {{ state.month }} · {{ state.started[:16].replace('T',' ') }}</div>
+{% endif %}
+
+<div class="stat-row">
+  <div class="stat"><div class="num">{{ state.ok_count }}</div><div class="lbl">חשבוניות הופקו</div></div>
+  <div class="stat"><div class="num">{{ '%.2f'|format(state.ok_total) }} ₪</div><div class="lbl">סה"כ הופק</div></div>
+  <div class="stat"><div class="num">{{ state.fail_count }}</div><div class="lbl">נכשלו</div></div>
+  <div class="stat"><div class="num">{{ state.skipped|length }}</div><div class="lbl">דולגו</div></div>
+</div>
+
+{% if state.results %}
+<div class="card">
+  <h2>פירוט</h2>
+  <table>
+    <tr><th>שם</th><th>טלפון</th><th>סכום</th><th>מסמך</th><th>הודעה</th><th>סטטוס</th></tr>
+    {% for r in state.results %}
+    <tr>
+      <td>{{ r.name }}</td><td>{{ r.phone }}</td><td>{{ '%.2f'|format(r.amount) }} ₪</td>
+      <td>{% if r.doc_url %}<a href="{{ r.doc_url }}" target="_blank" rel="noopener">{{ r.doc_number }}</a>
+          {% else %}{{ r.doc_number }}{% endif %}</td>
+      <td style="font-size:12.5px">{{ r.delivery }}</td>
+      <td>{% if r.ok %}<span class="tag ok">הופק</span>{% else %}
+          <span class="tag err">{{ r.error }}</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+{% if state.skipped %}
+<div class="card">
+  <h2>דולגו</h2>
+  <table>
+    <tr><th>שם</th><th>טלפון</th><th>סיבה</th></tr>
+    {% for s in state.skipped %}
+    <tr><td>{{ s.name }}</td><td>0{{ s.phone[3:] }}</td><td>{{ s.reason }}</td></tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+<div class="card">
+  <p class="note">מי שנכשל — מתקנים ומעלים שוב את אותו קובץ: מי שכבר קיבל מסמך החודש מדולג אוטומטית, אז אין סכנת חיוב כפול.</p>
+  <p style="margin-top:12px"><a class="btn" href="{{ url_for('dashboard') }}">→ חזרה לראשי</a></p>
+</div>
+
+{% endblock %}

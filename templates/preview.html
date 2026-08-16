@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}תצוגה מקדימה — {{ APP_NAME }}{% endblock %}
+{% block content %}
+
+<div class="card">
+  <h2>תצוגה מקדימה · {{ p.filename }} · חודש {{ p.month }}</h2>
+  <div class="stat-row" style="margin-bottom:8px">
+    <div class="stat"><div class="num">{{ p.rows|length }}</div><div class="lbl">לחיוב עכשיו</div></div>
+    <div class="stat"><div class="num">{{ '%.2f'|format(total) }} ₪</div><div class="lbl">סה"כ (כולל מע"מ)</div></div>
+    <div class="stat"><div class="num">{{ p.already|length }}</div><div class="lbl">כבר קיבלו החודש — ידולגו</div></div>
+    <div class="stat"><div class="num">{{ p.bad|length }}</div><div class="lbl">שורות בעייתיות — לא יטופלו</div></div>
+  </div>
+  {% if channel == 'dry' %}
+  <div class="error-box" style="background:#fbf3e2;border-color:#e8d5a8;color:#8a6a1f">
+    ⚠ ערוץ ההודעות עדיין לא הופעל — החשבוניות יופקו בחשבונית ירוקה אבל לא תישלח הודעה ללקוח.
+  </div>
+  {% endif %}
+</div>
+
+{% if p.bad %}
+<div class="card">
+  <h2>שורות בעייתיות (יש לתקן בקובץ ולהעלות שוב אם רלוונטי)</h2>
+  <table>
+    <tr><th>שורה</th><th>שם</th><th>טלפון בקובץ</th><th>הבעיה</th></tr>
+    {% for b in p.bad %}
+    <tr><td>{{ b.line }}</td><td>{{ b.name }}</td><td>{{ b.raw_phone }}</td>
+        <td><span class="tag err">{{ b.problems|join(' · ') }}</span></td></tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+{% if p.already %}
+<div class="card">
+  <h2>כבר קיבלו מסמך החודש (לפי חשבונית ירוקה) — מדולגים</h2>
+  <table>
+    <tr><th>שם</th><th>טלפון</th><th>סכום בקובץ</th></tr>
+    {% for r in p.already %}
+    <tr><td>{{ r.name }}</td><td>0{{ r.phone[3:] }}</td><td>{{ '%.2f'|format(r.amount) }} ₪</td></tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>שורות לחיוב</h2>
+  {% if p.rows %}
+  <table>
+    <tr><th>#</th><th>שם</th><th>טלפון</th><th>סכום</th></tr>
+    {% for r in p.rows %}
+    <tr><td>{{ loop.index }}</td><td>{{ r.name }}</td><td>0{{ r.phone[3:] }}</td>
+        <td>{{ '%.2f'|format(r.amount) }} ₪</td></tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="note">אין שורות תקינות לחיוב.</p>
+  {% endif %}
+</div>
+
+{% if p.rows %}
+<div class="card" style="border:1.5px solid var(--navy)">
+  <h2>אישור והפקה</h2>
+  <p class="note" style="margin-bottom:14px">
+    לחיצה על הכפתור תפיק <b>{{ p.rows|length }} חשבוניות מס/קבלה אמיתיות</b> בחשבונית ירוקה
+    של ג.ד. פיקה{% if channel != 'dry' %} ותשלח הודעה לכל לקוח{% endif %}. פעולה זו אינה ניתנת לביטול מכאן
+    (ביטול מסמך — בחשבונית ירוקה בלבד).
+  </p>
+  <form method="post" action="{{ url_for('start_run') }}">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <input type="hidden" name="token" value="{{ token }}">
+    <div class="field">
+      <label style="font-weight:400; display:flex; align-items:center; gap:8px">
+        <input type="checkbox" name="trial" value="1">
+        ריצת ניסיון — להפיק רק את השורה הראשונה (מומלץ בפעם הראשונה, לבדיקת רו"ח)
+      </label>
+    </div>
+    <button class="btn big" type="submit"
+            onclick="return confirm('להפיק את החשבוניות? הפעולה אמיתית.')">✓ אישור והפקת חשבוניות</button>
+    <a class="btn secondary" href="{{ url_for('dashboard') }}" style="margin-inline-start:10px">ביטול</a>
+  </form>
+</div>
+{% endif %}
+
+{% endblock %}

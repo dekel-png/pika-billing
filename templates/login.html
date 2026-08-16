@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card" style="max-width:420px; margin:60px auto 0">
+  <h2>כניסה למערכת</h2>
+  {% if error %}<div class="error-box">{{ error }}</div>{% endif %}
+  <form method="post">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <div class="field">
+      <label for="password">סיסמה</label>
+      <input type="password" id="password" name="password" autofocus autocomplete="current-password">
+    </div>
+    <button class="btn big" type="submit">כניסה</button>
+  </form>
+  <p class="note" style="margin-top:14px">הגישה מיועדת למנהל החיובים ולהנהלה בלבד.</p>
+</div>
+{% endblock %}

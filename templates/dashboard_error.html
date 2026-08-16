@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card" style="max-width:560px; margin:40px auto 0">
+  <div class="error-box">{{ error }}</div>
+  <a class="btn secondary" href="{{ url_for('dashboard') }}">→ חזרה לראשי</a>
+</div>
+{% endblock %}

@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block content %}
+
+{% if gi_ok %}
+  <div class="ok-box">✓ {{ gi_msg }}</div>
+{% else %}
+  <div class="error-box">חשבונית ירוקה לא זמינה: {{ gi_msg }}</div>
+{% endif %}
+
+<div class="stat-row">
+  <div class="stat"><div class="num">{{ billed_count }}</div><div class="lbl">לקוחות שכבר קיבלו חשבונית החודש ({{ month }})</div></div>
+  <div class="stat"><div class="num">{% if channel == 'inforu' %}SMS{% elif channel == 'whatsapp' %}וואטסאפ{% else %}כבוי{% endif %}</div><div class="lbl">ערוץ הודעות ללקוח{% if channel == 'dry' %} — מסמכים מופקים, הודעות עדיין לא נשלחות{% endif %}</div></div>
+</div>
+
+<div class="card">
+  <h2>איך זה עובד</h2>
+  <div class="steps">
+    <div class="step"><b>1 · טמפלט</b>מורידים את הקובץ וממלאים: שם, טלפון, סכום (בש"ח, כולל מע"מ)</div>
+    <div class="step"><b>2 · העלאה</b>מעלים את הקובץ — המערכת בודקת כל שורה ומראה תצוגה מקדימה</div>
+    <div class="step"><b>3 · אישור</b>רק אחרי אישור מפורש מופקות חשבוניות בחשבונית ירוקה{% if channel != 'dry' %} ונשלחת הודעה ללקוח{% endif %}</div>
+  </div>
+  <p class="note">מי שכבר קיבל חשבונית החודש מדולג אוטומטית — אי אפשר לחייב פעמיים.</p>
+  <p style="margin-top:12px"><a class="btn secondary" href="{{ url_for('template_csv') }}">⬇ הורדת טמפלט (CSV)</a></p>
+</div>
+
+<div class="card">
+  <h2>העלאת קובץ חיובים</h2>
+  <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
+    <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+    <div class="field">
+      <label>קובץ (CSV או Excel)</label>
+      <input type="file" name="charges" accept=".csv,.xlsx" required>
+    </div>
+    <div class="field" style="max-width:220px">
+      <label>חודש החיוב</label>
+      <input type="month" name="month" value="{{ month }}">
+    </div>
+    <button class="btn" type="submit">המשך לתצוגה מקדימה ←</button>
+  </form>
+  <p class="note" style="margin-top:10px">שום חשבונית לא מופקת בשלב הזה — קודם רואים הכול.</p>
+</div>
+
+{% if runs %}
+<div class="card">
+  <h2>ריצות אחרונות</h2>
+  <table>
+    <tr><th>מתי</th><th>חודש</th><th>הופקו</th><th>נכשלו</th><th>דולגו</th><th>סטטוס</th><th></th></tr>
+    {% for s in runs %}
+    <tr>
+      <td>{{ s.started[:16].replace('T',' ') }}</td>
+      <td>{{ s.month }}</td>
+      <td>{{ s.ok_count }}</td>
+      <td>{{ s.fail_count }}</td>
+      <td>{{ s.skipped|length }}</td>
+      <td>{% if s.status == 'finished' %}<span class="tag ok">הושלם</span>
+          {% elif s.status == 'running' %}<span class="tag warn">רץ…</span>
+          {% else %}<span class="tag err">נכשל</span>{% endif %}</td>
+      <td><a href="{{ url_for('report', run_id=s.run_id) }}">דוח</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="note" style="margin-top:8px">ההיסטוריה המלאה והמחייבת — בחשבון חשבונית ירוקה.</p>
+</div>
+{% endif %}
+
+{% endblock %}
