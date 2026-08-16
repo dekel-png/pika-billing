@@ -42,8 +42,9 @@ DOC_TYPE = int(os.getenv("DOC_TYPE", "320"))           # 320 = חשבונית מ
 PAYMENT_TYPE = int(os.getenv("PAYMENT_TYPE", "4"))     # 4 = הוראת קבע/העברה
 VAT_RATE = float(os.getenv("VAT_RATE", "0.18"))
 VAT_MODE = os.getenv("VAT_MODE", "included").strip()   # included | add | exempt
-LINE_DESCRIPTION = os.getenv("LINE_DESCRIPTION", "דמי קו סלולר - חודש {month}")
-DOC_REMARKS = os.getenv("DOC_REMARKS", "חיוב חודשי בהוראת קבע - שירותי סלולר")
+LINE_DESCRIPTION = os.getenv("LINE_DESCRIPTION",
+                             "חיוב בעבור חבילת תקשורת - חיוב חודשי {month}")
+DOC_REMARKS = os.getenv("DOC_REMARKS", "חיוב חודשי בהוראת קבע - חבילת תקשורת")
 SMS_SENDER = os.getenv("SMS_SENDER", "GD-PIKA")
 MESSAGE_TEMPLATE = os.getenv("MESSAGE_TEMPLATE",
     "שלום {name}, חשבונך חויב ב-{amount} ₪ עבור קו הסלולר לחודש {month}. "
