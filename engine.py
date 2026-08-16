@@ -58,7 +58,7 @@ SMS_MESSAGE_TEMPLATE = os.getenv("SMS_MESSAGE_TEMPLATE",
 
 
 def build_message(name: str, amount, month: str, link: str) -> str:
-    tpl = SMS_MESSAGE_TEMPLATE if channel() == "inforu" else MESSAGE_TEMPLATE
+    tpl = SMS_MESSAGE_TEMPLATE if channel() in ("inforu", "twilio") else MESSAGE_TEMPLATE
     return tpl.format(name=name, amount=amount, month=month, link=link)
 
 # ערוץ שליחה: dry (בלי הודעות) | inforu (SMS) | whatsapp (Green API)
@@ -393,6 +393,25 @@ def send_message(phone: str, text: str) -> str:
         status = body.get("StatusId", body.get("statusId"))
         if status not in (1, "1", None):
             raise RuntimeError(f"InforU החזיר סטטוס {status}")
+        return "SMS"
+    if ch == "twilio":
+        sid = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
+        tok = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
+        if not sid or not tok:
+            raise RuntimeError("חסרים TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN")
+        # שולח אלפאנומרי (GDPIKA) נתמך בישראל בלי רישום; אפשר גם מספר וירטואלי +1...
+        sender = os.getenv("TWILIO_FROM", "GDPIKA").strip()
+        r = requests.post(
+            f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json",
+            auth=(sid, tok),
+            data={"To": f"+{phone}", "From": sender, "Body": text}, timeout=30)
+        if r.status_code >= 400:
+            detail = ""
+            try:
+                detail = (r.json() or {}).get("message", "")[:150]
+            except Exception:
+                pass
+            raise RuntimeError(f"Twilio דחה את ההודעה (HTTP {r.status_code}): {detail}")
         return "SMS"
     if ch == "dry":
         return "לא נשלחה הודעה (ערוץ ההודעות עדיין לא הופעל)"
