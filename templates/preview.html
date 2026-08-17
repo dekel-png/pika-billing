@@ -15,6 +15,11 @@
     ⚠ ערוץ ההודעות עדיין לא הופעל — החשבוניות יופקו בחשבונית ירוקה אבל לא תישלח הודעה ללקוח.
   </div>
   {% endif %}
+  {% if p.rows and not p.get('has_gmt') %}
+  <div class="error-box" style="background:#fbf3e2;border-color:#e8d5a8;color:#8a6a1f">
+    ℹ בקובץ אין נתוני חשבון GMT — הקבלות יופקו בלי פרט זה. אפשר להוסיף עמודה "מספר חשבון GMT" בעתיד.
+  </div>
+  {% endif %}
 </div>
 
 {% if p.bad %}

@@ -70,14 +70,21 @@ def channel() -> str:
 COLUMN_ALIASES = {
     "passport": ["מספר דרכון", "דרכון", "passport_number", "passport", "passport no",
                  "passport_no", "passport number"],
-    "name":   ["שם מלא", "שם", "שם עובד", "שם העובד", "שם הלקוח", "לקוח", "עובד",
-               "full_name", "full name", "name", "worker", "customer"],
+    "name":   ["שם מלא", "שם", "שם פרטי", "שם עובד", "שם העובד", "עובד",
+               "full_name", "full name", "name", "first name", "first_name",
+               "worker"],
+    "lastname": ["שם משפחה", "משפחה", "last_name", "last name", "surname",
+                 "family name", "family_name"],
     "phone":  ["מספר טלפון", "טלפון", "נייד", "מס טלפון", "מס' טלפון",
                "phone_number", "phone number", "phone", "mobile"],
-    "amount": ["סכום", "מחיר", "סכום חיוב", "סכום לחיוב", "amount", "price"],
+    "amount": ["סכום", "מחיר", "סכום חיוב", "סכום לחיוב", "סכום גבייה", "סכום גביה",
+               "סכום לגבייה", "גבייה", "גביה", "amount", "price"],
     "gmt":    ["מספר חשבון gmt", "חשבון gmt", "gmt_account_number", "gmt_account",
                "gmt account", "gmt", "מספר ארנק gmt", "ארנק gmt"],
 }
+
+# עמודות רשות: המערכת עובדת גם בלעדיהן (שם-משפחה מתמזג לשם; GMT מושמט מהקבלה)
+OPTIONAL_FIELDS = ("lastname", "gmt")
 
 
 # ---------------------------------------------------------------- קריאת קובץ
@@ -116,14 +123,14 @@ def map_columns(header):
             if alias.lower() in lower:
                 mapping[fieldname] = lower.index(alias.lower())
                 break
-    missing = [f for f in ("passport", "name", "phone", "amount", "gmt") if f not in mapping]
+    missing = [f for f in ("passport", "name", "phone", "amount") if f not in mapping]
     if missing:
-        heb = {"passport": "מספר דרכון", "name": "שם מלא", "phone": "מספר טלפון",
-               "amount": "סכום", "gmt": "מספר חשבון GMT"}
+        heb = {"passport": "מספר דרכון", "name": "שם", "phone": "מספר טלפון",
+               "amount": "סכום"}
         raise ValueError(
             f"חסרות עמודות בקובץ: {', '.join(heb[m] for m in missing)}. "
             f"נמצאו הכותרות: {', '.join(h for h in header if h)}. "
-            f"בטמפלט צריך: מספר דרכון, שם מלא, מספר טלפון, סכום, מספר חשבון GMT")
+            f"עמודות חובה: מספר דרכון, שם, מספר טלפון, סכום (רשות: שם משפחה, חשבון GMT)")
     return mapping
 
 
@@ -190,10 +197,15 @@ def load_charges(blob: bytes, filename: str):
     good, bad, seen_phone, seen_pass = [], [], {}, {}
     for i, r in enumerate(raw_rows, start=2):
         def cell(f):
+            if f not in cols:
+                return None
             idx = cols[f]
             return r[idx] if idx < len(r) else None
         passport = _clean_id(cell("passport"))
         name = str(cell("name") or "").strip()
+        last = str(cell("lastname") or "").strip()
+        if last:
+            name = f"{name} {last}".strip()
         phone, perr = normalize_phone(cell("phone"))
         amount, aerr = parse_amount(cell("amount"))
         gmt = _clean_id(cell("gmt"))
@@ -204,8 +216,6 @@ def load_charges(blob: bytes, filename: str):
             problems.append("מספר דרכון חסר")
         elif re.fullmatch(r"\d+(\.\d+)?[eE][+\-]?\d+", str(cell("passport") or "").strip()):
             problems.append("מספר הדרכון נשמר בפורמט מדעי — להגדיר את העמודה כטקסט")
-        if not gmt:
-            problems.append("מספר חשבון GMT חסר")
         if passport and passport in seen_pass:
             problems.append(f"דרכון כפול בקובץ (שורה {seen_pass[passport]})")
         if phone and phone in seen_phone:

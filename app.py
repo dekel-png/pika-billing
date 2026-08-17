@@ -263,6 +263,7 @@ def upload():
     token = uuid.uuid4().hex
     PENDING[token] = {"rows": good, "bad": bad, "already": already,
                       "filename": f.filename, "month": month,
+                      "has_gmt": any(r_.get("gmt") for r_ in good),
                       "ts": time.time()}
     # ניקוי העלאות ישנות מהזיכרון
     for k in [k for k, v in PENDING.items() if time.time() - v["ts"] > 3600]:
