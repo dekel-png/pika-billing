@@ -254,19 +254,26 @@ def upload():
         good, bad = engine.load_charges(f.read(), f.filename)
     except ValueError as e:
         return render_template("dashboard_error.html", error=str(e))
+    messages_only = request.form.get("messages_only") == "1"
     already = []
     try:
         headers = engine.gi_token()
         engine.gi_verify_business(headers)
         billed = engine.gi_billed_phones(headers, month)
-        already = [r_ for r_ in good if r_["phone"] in billed]
-        good = [r_ for r_ in good if r_["phone"] not in billed]
+        if messages_only:
+            # הודעות בלבד: מי שכבר יש לו מסמך הוא היעד; מי שאין לו — המנוע ידלג עליו
+            good = [r_ for r_ in good if r_["phone"] in billed] + \
+                   [r_ for r_ in good if r_["phone"] not in billed]
+        else:
+            already = [r_ for r_ in good if r_["phone"] in billed]
+            good = [r_ for r_ in good if r_["phone"] not in billed]
     except Exception as e:
         return render_template("dashboard_error.html",
                                error=f"חשבונית ירוקה לא זמינה כרגע: {str(e)[:200]}")
     token = uuid.uuid4().hex
     PENDING[token] = {"rows": good, "bad": bad, "already": already,
                       "filename": f.filename, "month": month,
+                      "messages_only": messages_only,
                       "has_gmt": any(r_.get("gmt") for r_ in good),
                       "ts": time.time()}
     # ניקוי העלאות ישנות מהזיכרון
@@ -302,9 +309,12 @@ def start_run():
     if not p["rows"]:
         return render_template("dashboard_error.html", error="אין שורות תקינות להפקה")
     limit = 1 if request.form.get("trial") == "1" else 0
-    if not limit:
-        # שומר יתרה: גל שנגמר באמצע = עובדים עם מסמך בספרים ובלי הודעה (אין שליחה חוזרת).
-        # ההעלאה נשארת בזיכרון — אחרי הטעינה חוזרים לתצוגה המקדימה ומאשרים שוב.
+    force = request.form.get("force") == "1"
+    messages_only = bool(p.get("messages_only"))
+    if not limit and not force:
+        # שומר יתרה: גל שנגמר באמצע = עובדים עם מסמך בספרים ובלי הודעה. ההעלאה נשארת
+        # בזיכרון — אחרי הטעינה חוזרים לתצוגה המקדימה ומאשרים שוב; או מסמנים "להמשיך
+        # בכל זאת": המסמכים מופקים לכולם, וההודעות שנכשלו יורדות מהדוח כ-CSV לשליחה חוזרת.
         g = sms_guard(p["rows"], p["month"])
         if g and g["blocked"]:
             return render_template(
@@ -312,11 +322,11 @@ def start_run():
                 error=(f"יתרת ה-SMS לא מספיקה לגל הזה: נדרש ≈ ${g['usd']:.2f} "
                        f"({g['messages']} הודעות · {g['segments']} מקטעים), "
                        f"בחשבון Twilio יש ${g['balance']:.2f}. "
-                       "להטעין את Twilio ואז לחזור לתצוגה המקדימה ולאשר שוב. "
-                       "ריצת ניסיון של שורה אחת אפשרית גם עכשיו."))
+                       "להטעין את Twilio ואז לחזור לתצוגה המקדימה ולאשר שוב, "
+                       "או לסמן שם \"להמשיך בכל זאת\". ריצת ניסיון של שורה אחת אפשרית גם עכשיו."))
     PENDING.pop(token, None)
     run_id = uuid.uuid4().hex[:12]
-    state = engine.RunState(run_id=run_id, month=p["month"],
+    state = engine.RunState(run_id=run_id, month=p["month"], messages_only=messages_only,
                             started=now_il().isoformat(timespec="seconds"))
     with _RUNS_LOCK:
         RUNS[run_id] = state
@@ -324,16 +334,23 @@ def start_run():
     rows = p["rows"]
 
     def worker():
-        engine.execute_run(state, rows, p["month"], limit=limit)
+        engine.execute_run(state, rows, p["month"], limit=limit, messages_only=messages_only)
         mode = " (ריצת ניסיון — שורה אחת)" if limit else ""
-        if state.status == "finished":
+        if state.status != "finished":
+            notify_telegram(f"❌ ריצת חיובי סים {p['month']} נעצרה: {state.error}")
+        elif messages_only:
+            notify_telegram(
+                f"📨 שליחה חוזרת של הודעות — חיובי סים {p['month']}{mode}\n"
+                f"נשלחו {state.sent_count} · לא נשלחו {len(state.unsent)} · "
+                f"בלי מסמך (דולגו) {len(state.skipped)}\nקובץ: {p['filename']}")
+        else:
+            unsent = len(state.unsent)
             notify_telegram(
                 f"📱 חיובי סים {p['month']}{mode}\n"
                 f"הופקו {state.ok_count} חשבוניות על סך {state.ok_total:,.2f} ₪ · "
-                f"נכשלו {state.fail_count} · דולגו {len(state.skipped)}\n"
-                f"קובץ: {p['filename']}")
-        else:
-            notify_telegram(f"❌ ריצת חיובי סים {p['month']} נעצרה: {state.error}")
+                f"נכשלו {state.fail_count} · דולגו {len(state.skipped)}"
+                + (f"\n⚠ {unsent} הודעות לא נשלחו — CSV לשליחה חוזרת בדוח הריצה" if unsent else "")
+                + f"\nקובץ: {p['filename']}")
 
     threading.Thread(target=worker, daemon=True).start()
     return redirect(url_for("run_page", run_id=run_id))
@@ -446,6 +463,27 @@ def report(run_id):
         return render_template("dashboard_error.html",
                                error="הדוח לא בזיכרון (אחרי עדכון גרסה) — הנתונים המלאים בחשבונית ירוקה")
     return render_template("report.html", state=state)
+
+
+@app.get("/report/<run_id>/unsent.csv")
+def report_unsent_csv(run_id):
+    """השורות שיש להן מסמך אבל ההודעה לא נשלחה — בפורמט הטמפלט, להעלאה חוזרת
+    במצב "הודעות בלבד" אחרי הטענת SMS."""
+    if (r := require_login()):
+        return r
+    state = RUNS.get(run_id)
+    if not state:
+        return render_template("dashboard_error.html",
+                               error="הדוח לא בזיכרון (אחרי עדכון גרסה) — הנתונים המלאים בחשבונית ירוקה")
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(TEMPLATE_HEADERS)
+    for it in state.unsent:
+        w.writerow([it["passport"], it["name"], it["phone"], f"{it['amount']:g}", it.get("gmt", "")])
+    data = "\ufeff" + buf.getvalue()
+    return Response(data, mimetype="text/csv; charset=utf-8",
+                    headers={"Content-Disposition":
+                             f'attachment; filename="unsent-{state.month}-{run_id}.csv"'})
 
 
 # ------------------------------------------------------------- keep-alive

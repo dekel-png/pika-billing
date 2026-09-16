@@ -47,6 +47,12 @@
       <label>חודש החיוב</label>
       <input type="month" name="month" value="{{ month }}">
     </div>
+    <div class="field">
+      <label style="font-weight:400; display:flex; align-items:center; gap:8px">
+        <input type="checkbox" name="messages_only" value="1">
+        שליחת הודעות בלבד — בלי מסמכים חדשים (שליחה חוזרת למי שכבר יש לו מסמך לחודש הנבחר; למשל אחרי הטענת SMS, מקובץ "לא נשלחו" של דוח ריצה)
+      </label>
+    </div>
     <button class="btn" type="submit">המשך לתצוגה מקדימה ←</button>
   </form>
   <p class="note" style="margin-top:10px">שום חשבונית לא מופקת בשלב הזה — קודם רואים הכול.</p>

@@ -3,9 +3,14 @@
 {% block content %}
 
 <div class="card">
-  <h2>תצוגה מקדימה · {{ p.filename }} · חודש {{ p.month }}</h2>
+  <h2>תצוגה מקדימה · {{ p.filename }} · חודש {{ p.month }}{% if p.messages_only %} · הודעות בלבד{% endif %}</h2>
+  {% if p.messages_only %}
+  <div class="error-box" style="background:#fbf3e2;border-color:#e8d5a8;color:#8a6a1f">
+    📨 <b>מצב "הודעות בלבד"</b> — לא יופק שום מסמך. הודעה תישלח רק למי שכבר יש לו מסמך לחודש {{ p.month }} בחשבונית ירוקה; מי שאין לו מסמך יופיע בדוח כ"דולג".
+  </div>
+  {% endif %}
   <div class="stat-row" style="margin-bottom:8px">
-    <div class="stat"><div class="num">{{ p.rows|length }}</div><div class="lbl">לחיוב עכשיו</div></div>
+    <div class="stat"><div class="num">{{ p.rows|length }}</div><div class="lbl">{% if p.messages_only %}הודעות לשליחה (למי שיש מסמך){% else %}לחיוב עכשיו{% endif %}</div></div>
     <div class="stat"><div class="num">{{ '%.2f'|format(total) }} ₪</div><div class="lbl">סה"כ (כולל מע"מ)</div></div>
     <div class="stat"><div class="num">{{ p.already|length }}</div><div class="lbl">כבר קיבלו החודש — ידולגו</div></div>
     <div class="stat"><div class="num">{{ p.bad|length }}</div><div class="lbl">שורות בעייתיות — לא יטופלו</div></div>
@@ -19,7 +24,7 @@
   <div class="{{ 'error-box' if sms.blocked else 'ok-box' }}">
     📱 SMS: {{ sms.messages }} הודעות · {{ sms.segments }} מקטעים · עלות משוערת ≈ ${{ '%.2f'|format(sms.usd) }}
     {% if sms.balance is not none %} · יתרת Twilio: ${{ '%.2f'|format(sms.balance) }}{% else %} · יתרת Twilio לא זמינה כרגע{% endif %}
-    {% if sms.blocked %}<br><b>היתרה לא מספיקה לגל הזה</b> — להטעין את חשבון Twilio, לחזור לדף הזה ולאשר. ריצת ניסיון (שורה אחת) אפשרית כבר עכשיו.{% endif %}
+    {% if sms.blocked %}<br><b>היתרה לא מספיקה לגל הזה</b> — להטעין את חשבון Twilio, לחזור לדף הזה ולאשר. ריצת ניסיון (שורה אחת) אפשרית כבר עכשיו; אפשר גם לסמן למטה "להמשיך בכל זאת".{% endif %}
     {% if not sms.short_links %}<br>⚠ הלינק הקצר כבוי (אין SECRET_KEY) — כל הודעה תעלה 3 מקטעים.{% endif %}
   </div>
   {% endif %}
@@ -73,11 +78,16 @@
 
 {% if p.rows %}
 <div class="card" style="border:1.5px solid var(--navy)">
-  <h2>אישור והפקה</h2>
+  <h2>{% if p.messages_only %}אישור ושליחת הודעות{% else %}אישור והפקה{% endif %}</h2>
   <p class="note" style="margin-bottom:14px">
+    {% if p.messages_only %}
+    לחיצה על הכפתור תשלח הודעה עם הלינק למסמך הקיים ל-<b>עד {{ p.rows|length }} לקוחות</b>
+    (רק למי שיש מסמך לחודש {{ p.month }}). שום מסמך לא יופק.
+    {% else %}
     לחיצה על הכפתור תפיק <b>{{ p.rows|length }} חשבוניות מס/קבלה אמיתיות</b> בחשבונית ירוקה
     של ג.ד. פיקה{% if channel != 'dry' %} ותשלח הודעה לכל לקוח{% endif %}. פעולה זו אינה ניתנת לביטול מכאן
     (ביטול מסמך — בחשבונית ירוקה בלבד).
+    {% endif %}
   </p>
   <form method="post" action="{{ url_for('start_run') }}">
     <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
@@ -85,11 +95,19 @@
     <div class="field">
       <label style="font-weight:400; display:flex; align-items:center; gap:8px">
         <input type="checkbox" name="trial" value="1">
-        ריצת ניסיון — להפיק רק את השורה הראשונה (מומלץ בפעם הראשונה, לבדיקת רו"ח)
+        ריצת ניסיון — {% if p.messages_only %}לשלוח רק את ההודעה הראשונה{% else %}להפיק רק את השורה הראשונה (מומלץ בפעם הראשונה, לבדיקת רו"ח){% endif %}
       </label>
     </div>
+    {% if sms and sms.blocked %}
+    <div class="field">
+      <label style="font-weight:400; display:flex; align-items:center; gap:8px; color:var(--danger)">
+        <input type="checkbox" name="force" value="1">
+        להמשיך בכל זאת למרות היתרה — {% if p.messages_only %}ההודעות שייכשלו{% else %}המסמכים יופקו לכולם, וההודעות שייכשלו{% endif %} יורדו מהדוח כקובץ "לא נשלחו" לשליחה חוזרת אחרי הטענה
+      </label>
+    </div>
+    {% endif %}
     <button class="btn big" type="submit"
-            onclick="return confirm('להפיק את החשבוניות? הפעולה אמיתית.')">✓ אישור והפקת חשבוניות</button>
+            onclick="return confirm('{% if p.messages_only %}לשלוח את ההודעות?{% else %}להפיק את החשבוניות? הפעולה אמיתית.{% endif %}')">{% if p.messages_only %}✓ שליחת הודעות{% else %}✓ אישור והפקת חשבוניות{% endif %}</button>
     <a class="btn secondary" href="{{ url_for('dashboard') }}" style="margin-inline-start:10px">ביטול</a>
   </form>
 </div>

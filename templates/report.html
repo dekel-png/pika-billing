@@ -5,15 +5,28 @@
 {% if state.status == 'failed' %}
 <div class="error-box">הריצה נעצרה: {{ state.error }}</div>
 {% else %}
-<div class="ok-box">✓ הריצה הושלמה · חודש {{ state.month }} · {{ state.started[:16].replace('T',' ') }}</div>
+<div class="ok-box">✓ הריצה הושלמה · חודש {{ state.month }} · {{ state.started[:16].replace('T',' ') }}{% if state.messages_only %} · הודעות בלבד{% endif %}</div>
 {% endif %}
 
 <div class="stat-row">
+  {% if state.messages_only %}
+  <div class="stat"><div class="num">{{ state.sent_count }}</div><div class="lbl">הודעות נשלחו</div></div>
+  <div class="stat"><div class="num">{{ state.unsent|length }}</div><div class="lbl">לא נשלחו</div></div>
+  {% else %}
   <div class="stat"><div class="num">{{ state.ok_count }}</div><div class="lbl">חשבוניות הופקו</div></div>
   <div class="stat"><div class="num">{{ '%.2f'|format(state.ok_total) }} ₪</div><div class="lbl">סה"כ הופק</div></div>
   <div class="stat"><div class="num">{{ state.fail_count }}</div><div class="lbl">נכשלו</div></div>
+  {% endif %}
   <div class="stat"><div class="num">{{ state.skipped|length }}</div><div class="lbl">דולגו</div></div>
 </div>
+
+{% if state.unsent %}
+<div class="error-box" style="background:#fbf3e2;border-color:#e8d5a8;color:#8a6a1f">
+  ⚠ <b>{{ state.unsent|length }} לקוחות עם מסמך שההודעה אליהם לא נשלחה.</b>
+  להוריד את הקובץ, להטעין SMS אם צריך, ולהעלות אותו שוב בראשי עם הסימון "שליחת הודעות בלבד" — לא יופקו מסמכים כפולים.
+  <p style="margin-top:10px"><a class="btn secondary" href="{{ url_for('report_unsent_csv', run_id=state.run_id) }}">⬇ קובץ "לא נשלחו" לשליחה חוזרת</a></p>
+</div>
+{% endif %}
 
 {% if state.results %}
 <div class="card">
@@ -27,8 +40,9 @@
       <td>{% if r.doc_url %}<a href="{{ r.doc_url }}" target="_blank" rel="noopener">{{ r.doc_number }}</a>
           {% else %}{{ r.doc_number }}{% endif %}</td>
       <td style="font-size:12.5px">{{ r.delivery }}</td>
-      <td>{% if r.ok %}<span class="tag ok">הופק</span>{% else %}
-          <span class="tag err">{{ r.error }}</span>{% endif %}</td>
+      <td>{% if r.ok and r.sent %}<span class="tag ok">{% if state.messages_only %}נשלח{% else %}הופק + נשלח{% endif %}</span>
+          {% elif r.ok %}<span class="tag warn">{% if state.messages_only %}לא נשלח{% else %}הופק, לא נשלח{% endif %}</span>
+          {% else %}<span class="tag err">{{ r.error }}</span>{% endif %}</td>
     </tr>
     {% endfor %}
   </table>

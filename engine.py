@@ -415,11 +415,12 @@ def month_bounds_dates(month: str):
     return f"{y}-{m:02d}-01", f"{y}-{m:02d}-{last:02d}"
 
 
-def gi_billed(headers, month: str) -> tuple[set, set]:
-    """(טלפונים, דרכונים) שכבר קיבלו מסמך החודש — מקור האמת למניעת כפל.
+def gi_month_docs(headers, month: str) -> dict:
+    """כל מסמכי החודש (DOC_TYPE) מהספרים — מקור האמת גם למניעת כפל וגם לשליחה חוזרת
+    של הודעות: {"phones": {טלפון: doc}, "passports": {דרכון: doc}}, doc = {id, number, url}.
     הדרכון מחולץ מהערות המסמך ("דרכון: X") — fail-open אם לא נמצא."""
     frm, to = month_bounds_dates(month)
-    phones, passports, page = set(), set(), 1
+    phones, passports, page = {}, {}, 1
     while page <= 40:
         r = requests.post(f"{GI_BASE}/documents/search", headers=headers,
                           json={"fromDate": frm, "toDate": to, "type": [DOC_TYPE],
@@ -428,17 +429,25 @@ def gi_billed(headers, month: str) -> tuple[set, set]:
         body = r.json() or {}
         items = body.get("items") or []
         for it in items:
+            doc = {"id": str(it.get("id") or ""), "number": str(it.get("number") or ""),
+                   "url": _extract_url(it)}
             raw = ((it.get("client") or {}).get("phone")) or ""
             norm, _ = normalize_phone(raw)
             if norm:
-                phones.add(norm)
+                phones.setdefault(norm, doc)
             m = re.search(r"דרכון:\s*(\S+)", str(it.get("remarks") or ""))
             if m:
-                passports.add(m.group(1))
+                passports.setdefault(m.group(1), doc)
         if len(items) < 100:
             break
         page += 1
-    return phones, passports
+    return {"phones": phones, "passports": passports}
+
+
+def gi_billed(headers, month: str) -> tuple[set, set]:
+    """(טלפונים, דרכונים) שכבר קיבלו מסמך החודש — תאימות לאחור."""
+    d = gi_month_docs(headers, month)
+    return set(d["phones"]), set(d["passports"])
 
 
 def gi_billed_phones(headers, month: str) -> set:
@@ -583,10 +592,20 @@ class RunState:
     started: str = ""
     results: list = field(default_factory=list)
     skipped: list = field(default_factory=list)
+    messages_only: bool = False      # שליחה חוזרת של הודעות בלבד — בלי מסמכים חדשים
 
     @property
     def ok_count(self):
         return sum(1 for r in self.results if r["ok"])
+
+    @property
+    def sent_count(self):
+        return sum(1 for r in self.results if r.get("sent"))
+
+    @property
+    def unsent(self):
+        """יש מסמך, ההודעה לא נשלחה — היעד של ריצת "הודעות בלבד" אחרי הטענה."""
+        return [r for r in self.results if r["ok"] and not r.get("sent")]
 
     @property
     def fail_count(self):
@@ -597,40 +616,65 @@ class RunState:
         return sum(r["amount"] for r in self.results if r["ok"])
 
 
-def execute_run(state: RunState, rows: list[dict], month: str, limit: int = 0):
-    """מפיק מסמך ושולח הודעה לכל שורה. מעדכן את state תוך כדי (ל-polling)."""
+FAILED_PREFIX = "המסמך הופק אך ההודעה נכשלה"
+
+
+def _deliver(item: dict, r: dict, month: str, doc_id: str, url: str):
+    """שולח את ההודעה למסמך קיים ומסמן sent. כשל שליחה לא מפיל את הפריט — המסמך בספרים."""
+    # ל-SMS: לינק קצר (מקטע אחד); לוואטסאפ ולדוח: הלינק המלא
+    msg_link = (short_link(doc_id) if channel() in SMS_CHANNELS else "") \
+        or url or "(link will follow)"
+    msg = build_message(r["name"], f"{r['amount']:g}", month, msg_link)
+    try:
+        item["delivery"] = send_message(r["phone"], msg)
+        item["sent"] = channel() != "dry"
+    except Exception as se:
+        item["delivery"] = f"{FAILED_PREFIX}: {se}"
+        item["sent"] = False
+
+
+def execute_run(state: RunState, rows: list[dict], month: str, limit: int = 0,
+                messages_only: bool = False):
+    """מפיק מסמך ושולח הודעה לכל שורה. מעדכן את state תוך כדי (ל-polling).
+    messages_only: לא מופק שום מסמך — נשלחת הודעה רק למי שכבר יש לו מסמך לחודש
+    (שליחה חוזרת אחרי הטענת SMS / למי שלא קיבל). מי שאין לו מסמך — מדולג."""
+    state.messages_only = messages_only
     try:
         headers = gi_token()
         gi_verify_business(headers)
-        billed_phones, billed_passports = gi_billed(headers, month)
+        docs = gi_month_docs(headers, month)
         todo = []
         for r in rows:
-            if r["phone"] in billed_phones or (r.get("passport") and r["passport"] in billed_passports):
+            existing = docs["phones"].get(r["phone"]) or \
+                (docs["passports"].get(r["passport"]) if r.get("passport") else None)
+            if messages_only:
+                if existing:
+                    todo.append((r, existing))
+                else:
+                    state.skipped.append({**r, "reason": "אין מסמך לחודש הזה — צריך הפקה רגילה"})
+            elif existing:
                 state.skipped.append({**r, "reason": "כבר קיבל מסמך החודש (לפי חשבונית ירוקה)"})
             else:
-                todo.append(r)
+                todo.append((r, None))
         if limit:
-            for r in todo[limit:]:
+            for r, _ in todo[limit:]:
                 state.skipped.append({**r, "reason": "מעבר למגבלת ריצת הניסיון"})
             todo = todo[:limit]
         state.total = len(todo)
-        for r in todo:
+        for r, existing in todo:
             item = {"passport": r.get("passport", ""), "name": r["name"],
                     "phone": "0" + r["phone"][3:], "amount": r["amount"],
                     "gmt": r.get("gmt", ""),
-                    "ok": False, "doc_number": "", "doc_url": "", "delivery": "", "error": ""}
+                    "ok": False, "sent": False, "doc_number": "", "doc_url": "",
+                    "delivery": "", "error": ""}
             try:
-                doc_id, doc_num, url = gi_create_doc(headers, r, month)
+                if existing:
+                    doc_id, doc_num, url = existing["id"], existing["number"], existing["url"]
+                else:
+                    doc_id, doc_num, url = gi_create_doc(headers, r, month)
                 item["doc_number"] = doc_num or doc_id
                 item["doc_url"] = url
-                # ל-SMS: לינק קצר (מקטע אחד); לוואטסאפ ולדוח: הלינק המלא
-                msg_link = (short_link(doc_id) if channel() in SMS_CHANNELS else "") \
-                    or url or "(link will follow)"
-                msg = build_message(r["name"], f"{r['amount']:g}", month, msg_link)
-                try:
-                    item["delivery"] = send_message(r["phone"], msg)
-                except Exception as se:
-                    item["delivery"] = f"המסמך הופק אך ההודעה נכשלה: {se}"
+                _deliver(item, r, month, doc_id, url)
                 item["ok"] = True
             except Exception as e:
                 item["error"] = str(e)[:250]
