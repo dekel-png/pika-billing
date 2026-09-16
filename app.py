@@ -309,21 +309,20 @@ def start_run():
     if not p["rows"]:
         return render_template("dashboard_error.html", error="אין שורות תקינות להפקה")
     limit = 1 if request.form.get("trial") == "1" else 0
-    force = request.form.get("force") == "1"
     messages_only = bool(p.get("messages_only"))
-    if not limit and not force:
-        # שומר יתרה: גל שנגמר באמצע = עובדים עם מסמך בספרים ובלי הודעה. ההעלאה נשארת
-        # בזיכרון — אחרי הטעינה חוזרים לתצוגה המקדימה ומאשרים שוב; או מסמנים "להמשיך
-        # בכל זאת": המסמכים מופקים לכולם, וההודעות שנכשלו יורדות מהדוח כ-CSV לשליחה חוזרת.
+    if not limit:
+        # הכול-או-כלום (הוראת דקל 16/09): הריצה לא מתחילה עד שהיתרה מכסה את כל ההודעות
+        # במחיר המקסימלי של Twilio לישראל (נשלף חי). ההעלאה נשארת בזיכרון — מטעינים,
+        # חוזרים לתצוגה המקדימה ומאשרים. חצי גל = עובדים עם מסמך בספרים ובלי הודעה — לא כאן.
         g = sms_guard(p["rows"], p["month"])
         if g and g["blocked"]:
             return render_template(
                 "dashboard_error.html",
-                error=(f"יתרת ה-SMS לא מספיקה לגל הזה: נדרש ≈ ${g['usd']:.2f} "
-                       f"({g['messages']} הודעות · {g['segments']} מקטעים), "
-                       f"בחשבון Twilio יש ${g['balance']:.2f}. "
-                       "להטעין את Twilio ואז לחזור לתצוגה המקדימה ולאשר שוב, "
-                       "או לסמן שם \"להמשיך בכל זאת\". ריצת ניסיון של שורה אחת אפשרית גם עכשיו."))
+                error=(f"יתרת ה-SMS לא מספיקה לכל הגל, והמערכת שולחת הכול או כלום: "
+                       f"נדרש ${g['usd']:.2f} ({g['messages']} הודעות × ${g['price']:.4f}), "
+                       f"בחשבון Twilio יש ${g['balance']:.2f} — חסרים ${g['shortfall']:.2f}. "
+                       "להטעין את Twilio ואז לחזור לתצוגה המקדימה ולאשר שוב. "
+                       "ריצת ניסיון של שורה אחת אפשרית גם עכשיו."))
     PENDING.pop(token, None)
     run_id = uuid.uuid4().hex[:12]
     state = engine.RunState(run_id=run_id, month=p["month"], messages_only=messages_only,
@@ -427,6 +426,7 @@ def sms_guard(rows: list, month: str):
     bal = engine.twilio_balance()
     est["balance"] = bal
     est["blocked"] = bal is not None and bal < est["usd"]
+    est["shortfall"] = round(max(0.0, est["usd"] - bal), 2) if bal is not None else None
     est["short_links"] = engine.short_links_enabled()
     return est
 

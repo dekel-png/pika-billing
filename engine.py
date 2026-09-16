@@ -24,6 +24,7 @@ import io
 import re
 import csv
 import calendar
+import time
 import hmac
 import uuid
 import base64
@@ -94,7 +95,36 @@ def build_message(name: str, amount, month: str, link: str) -> str:
 _GSM7 = set("@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?"
             "¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà")
 _GSM7_EXT = set("^{}\\[~]|€")
-SMS_SEGMENT_COST_USD = float(os.getenv("SMS_SEGMENT_COST_USD", "0.26"))  # Twilio→IL, נמדד 08/2026
+SMS_SEGMENT_COST_USD = float(os.getenv("SMS_SEGMENT_COST_USD", "0.2575"))  # Twilio→IL, מחירון 09/2026 (פולבק)
+_PRICE_CACHE: dict = {"usd": None, "ts": 0.0}
+
+
+def twilio_segment_price() -> float:
+    """מחיר מקטע SMS לישראל מה-Pricing API של Twilio — המקסימום בין המפעילים, כי
+    "הכול או כלום" חייב את המחיר הגרוע ביותר. מטמון 12 שעות; פולבק ל-SMS_SEGMENT_COST_USD."""
+    if channel() != "twilio":
+        return SMS_SEGMENT_COST_USD
+    now = time.time()
+    if _PRICE_CACHE["usd"] and now - _PRICE_CACHE["ts"] < 43200:
+        return _PRICE_CACHE["usd"]
+    sid = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
+    tok = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
+    if not sid or not tok:
+        return SMS_SEGMENT_COST_USD
+    try:
+        r = requests.get("https://pricing.twilio.com/v1/Messaging/Countries/IL",
+                         auth=(sid, tok), timeout=15)
+        if r.ok:
+            prices = [float(p.get("current_price") or 0)
+                      for o in (r.json() or {}).get("outbound_sms_prices", [])
+                      for p in o.get("prices", [])]
+            mx = max(prices, default=0.0)
+            if mx > 0:
+                _PRICE_CACHE.update(usd=mx, ts=now)
+                return mx
+    except Exception:
+        pass
+    return SMS_SEGMENT_COST_USD
 
 
 def sms_segments(text: str) -> int:
@@ -115,8 +145,9 @@ def sms_wave_estimate(rows: list[dict], month: str) -> dict:
     segs = 0
     for r in rows:
         segs += sms_segments(build_message(r["name"], f"{r['amount']:g}", month, sample_link))
-    return {"messages": len(rows), "segments": segs,
-            "usd": round(segs * SMS_SEGMENT_COST_USD, 2),
+    price = twilio_segment_price()
+    return {"messages": len(rows), "segments": segs, "price": price,
+            "usd": round(segs * price, 2),
             "per_message": (segs / len(rows)) if rows else 0}
 
 

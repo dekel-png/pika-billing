@@ -10,6 +10,8 @@ os.environ["SECRET_KEY"] = "unit-test-secret-not-prod"
 os.environ["SEND_CHANNEL"] = "twilio"
 os.environ["COOKIE_SECURE"] = "0"
 os.environ.pop("RENDER", None)          # בלי keep-alive בבדיקות
+os.environ.pop("TWILIO_ACCOUNT_SID", None)   # בלי מחירון חי בבדיקות — פולבק דטרמיניסטי
+os.environ.pop("TWILIO_AUTH_TOKEN", None)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import app as app_module  # noqa: E402
 import engine  # noqa: E402
@@ -107,6 +109,7 @@ class BalanceGuardTests(_Base):
         html = r.get_data(as_text=True)
         self.assertEqual(r.status_code, 200)
         self.assertIn("יתרת ה-SMS לא מספיקה", html)
+        self.assertIn("חסרים $", html)
         self.assertEqual(self.calls, [])                       # שום ריצה לא התחילה
         self.assertIn("tok1", app_module.PENDING)               # ההעלאה נשמרה לניסיון חוזר
 
@@ -185,17 +188,31 @@ class MessagesOnlyTests(_Base):
         import time; time.sleep(0.2)
         self.assertEqual(self.calls, [(2, 0, True)])
 
-    def test_force_overrides_low_balance(self):
+    def test_all_or_nothing_no_force_override(self):
+        """הוראת דקל 16/09: לא חצי-חצי — אין דרך להריץ גל שהיתרה לא מכסה במלואו."""
         self.login()
         app_module.PENDING["tok1"] = {"rows": list(ROWS), "bad": [], "already": [], "filename": "x.csv",
                                       "month": "2026-09", "has_gmt": False, "ts": 9e12}
         self.patch(engine, "twilio_balance", lambda: 0.30)
         html = self.client.get("/preview/tok1").get_data(as_text=True)
-        self.assertIn('name="force"', html)
+        self.assertNotIn('name="force"', html)
+        self.assertIn("הכול או כלום", html)
+        self.assertIn("חסרים $", html)
         r = self.client.post("/run", data={"_csrf": "csrf-test", "token": "tok1", "force": "1"})
-        self.assertEqual(r.status_code, 302)
-        import time; time.sleep(0.2)
-        self.assertEqual(self.calls, [(2, 0, False)])
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("הכול או כלום", r.get_data(as_text=True))
+        self.assertEqual(self.calls, [])
+        self.assertIn("tok1", app_module.PENDING)
+
+    def test_guard_reports_exact_shortfall(self):
+        self.patch(engine, "twilio_balance", lambda: 0.30)
+        g = app_module.sms_guard(ROWS, "2026-09")
+        self.assertTrue(g["blocked"])
+        self.assertAlmostEqual(g["shortfall"], round(2 * engine.SMS_SEGMENT_COST_USD - 0.30, 2))
+        self.patch(engine, "twilio_balance", lambda: 10.0)
+        g = app_module.sms_guard(ROWS, "2026-09")
+        self.assertFalse(g["blocked"])
+        self.assertEqual(g["shortfall"], 0.0)
 
     def test_unsent_csv_lists_only_unsent(self):
         self.login()

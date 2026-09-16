@@ -22,9 +22,9 @@
   {% endif %}
   {% if sms %}
   <div class="{{ 'error-box' if sms.blocked else 'ok-box' }}">
-    📱 SMS: {{ sms.messages }} הודעות · {{ sms.segments }} מקטעים · עלות משוערת ≈ ${{ '%.2f'|format(sms.usd) }}
+    📱 SMS: {{ sms.messages }} הודעות · {{ sms.segments }} מקטעים × ${{ '%.4f'|format(sms.price) }} = ${{ '%.2f'|format(sms.usd) }}
     {% if sms.balance is not none %} · יתרת Twilio: ${{ '%.2f'|format(sms.balance) }}{% else %} · יתרת Twilio לא זמינה כרגע{% endif %}
-    {% if sms.blocked %}<br><b>היתרה לא מספיקה לגל הזה</b> — להטעין את חשבון Twilio, לחזור לדף הזה ולאשר. ריצת ניסיון (שורה אחת) אפשרית כבר עכשיו; אפשר גם לסמן למטה "להמשיך בכל זאת".{% endif %}
+    {% if sms.blocked %}<br><b>היתרה לא מספיקה לכל הגל — חסרים ${{ '%.2f'|format(sms.shortfall) }}.</b> המערכת שולחת הכול או כלום: להטעין את חשבון Twilio, לחזור לדף הזה ולאשר. ריצת ניסיון (שורה אחת) אפשרית כבר עכשיו.{% elif sms.balance is not none %} · ✓ היתרה מכסה את כל ההודעות{% endif %}
     {% if not sms.short_links %}<br>⚠ הלינק הקצר כבוי (אין SECRET_KEY) — כל הודעה תעלה 3 מקטעים.{% endif %}
   </div>
   {% endif %}
@@ -98,14 +98,6 @@
         ריצת ניסיון — {% if p.messages_only %}לשלוח רק את ההודעה הראשונה{% else %}להפיק רק את השורה הראשונה (מומלץ בפעם הראשונה, לבדיקת רו"ח){% endif %}
       </label>
     </div>
-    {% if sms and sms.blocked %}
-    <div class="field">
-      <label style="font-weight:400; display:flex; align-items:center; gap:8px; color:var(--danger)">
-        <input type="checkbox" name="force" value="1">
-        להמשיך בכל זאת למרות היתרה — {% if p.messages_only %}ההודעות שייכשלו{% else %}המסמכים יופקו לכולם, וההודעות שייכשלו{% endif %} יורדו מהדוח כקובץ "לא נשלחו" לשליחה חוזרת אחרי הטענה
-      </label>
-    </div>
-    {% endif %}
     <button class="btn big" type="submit"
             onclick="return confirm('{% if p.messages_only %}לשלוח את ההודעות?{% else %}להפיק את החשבוניות? הפעולה אמיתית.{% endif %}')">{% if p.messages_only %}✓ שליחת הודעות{% else %}✓ אישור והפקת חשבוניות{% endif %}</button>
     <a class="btn secondary" href="{{ url_for('dashboard') }}" style="margin-inline-start:10px">ביטול</a>

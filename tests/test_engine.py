@@ -7,6 +7,8 @@ from pathlib import Path
 
 os.environ.setdefault("SECRET_KEY", "unit-test-secret-not-prod")
 os.environ["SEND_CHANNEL"] = "twilio"
+os.environ.pop("TWILIO_ACCOUNT_SID", None)
+os.environ.pop("TWILIO_AUTH_TOKEN", None)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import engine  # noqa: E402
 
@@ -87,6 +89,37 @@ class SmsSegmentTests(unittest.TestCase):
         self.assertEqual(est["messages"], 142)
         self.assertEqual(est["segments"], 142)
         self.assertAlmostEqual(est["usd"], round(142 * engine.SMS_SEGMENT_COST_USD, 2))
+
+    def test_segment_price_fallback_without_keys(self):
+        engine._PRICE_CACHE.update(usd=None, ts=0.0)
+        self.assertEqual(engine.twilio_segment_price(), engine.SMS_SEGMENT_COST_USD)
+
+    def test_segment_price_live_takes_max_carrier_and_caches(self):
+        calls = []
+
+        class R:
+            ok = True
+
+            def json(self):
+                return {"outbound_sms_prices": [
+                    {"carrier": "A", "prices": [{"current_price": "0.19"}, {"current_price": "0.2575"}]},
+                    {"carrier": "B", "prices": [{"current_price": "0.21"}]}]}
+
+        orig_get = engine.requests.get
+        engine.requests.get = lambda *a, **k: calls.append(1) or R()
+        os.environ["TWILIO_ACCOUNT_SID"] = "AC-test"; os.environ["TWILIO_AUTH_TOKEN"] = "tok"
+        try:
+            engine._PRICE_CACHE.update(usd=None, ts=0.0)
+            self.assertEqual(engine.twilio_segment_price(), 0.2575)
+            self.assertEqual(engine.twilio_segment_price(), 0.2575)
+            self.assertEqual(len(calls), 1)                      # מטמון
+            est = engine.sms_wave_estimate([{"name": "A", "amount": 1.0}] * 142, "2026-09")
+            self.assertEqual(est["price"], 0.2575)
+            self.assertAlmostEqual(est["usd"], round(142 * 0.2575, 2))
+        finally:
+            engine.requests.get = orig_get
+            os.environ.pop("TWILIO_ACCOUNT_SID"); os.environ.pop("TWILIO_AUTH_TOKEN")
+            engine._PRICE_CACHE.update(usd=None, ts=0.0)
 
     def test_whatsapp_channel_keeps_full_template(self):
         os.environ["SEND_CHANNEL"] = "whatsapp"
