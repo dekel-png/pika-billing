@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}המסמך שלך — {{ APP_NAME }}{% endblock %}
+{% block content %}
+<meta http-equiv="refresh" content="6">
+<div class="card" style="max-width:520px; margin:40px auto 0; text-align:center">
+  <div style="font-size:40px; margin-bottom:10px">⏳</div>
+  <h2 style="margin-bottom:8px">המסמך שלך נטען…</h2>
+  <p class="note" style="margin-bottom:14px">הדף יתרענן לבד בעוד כמה שניות. אם זה לא עובד — לחצו שוב על הקישור מההודעה.</p>
+  <hr style="border:none; border-top:1px solid var(--line); margin:14px 0">
+  <h2 style="margin-bottom:8px" dir="ltr">Your receipt is loading…</h2>
+  <p class="note" dir="ltr">This page refreshes by itself in a few seconds. If it does not open, tap the link in your message again.</p>
+</div>
+{% endblock %}

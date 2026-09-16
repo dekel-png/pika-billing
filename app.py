@@ -124,6 +124,7 @@ def notify_telegram(text: str):
 @app.get("/health")
 def health():
     return {"ok": True, "app": "pika-billing", "channel": engine.channel(),
+            "short_links": engine.short_links_enabled(),
             "time": now_il().isoformat(timespec="seconds")}
 
 
@@ -176,9 +177,12 @@ def dashboard():
     except Exception as e:
         gi_msg = str(e)[:200]
     runs = sorted(RUNS.values(), key=lambda s: s.started, reverse=True)[:10]
+    sms_balance = engine.twilio_balance()   # None אם לא twilio / ה-API לא ענה
     return render_template("dashboard.html", month=month, gi_ok=gi_ok, gi_msg=gi_msg,
                            billed_count=billed_count, channel=engine.channel(),
-                           runs=runs, role=session.get("role"))
+                           runs=runs, role=session.get("role"),
+                           sms_balance=sms_balance,
+                           segment_cost=engine.SMS_SEGMENT_COST_USD)
 
 
 TEMPLATE_HEADERS = ["מספר דרכון", "שם מלא", "מספר טלפון", "סכום", "מספר חשבון GMT"]
@@ -281,7 +285,8 @@ def preview(token):
                                error="ההעלאה פגה — להעלות את הקובץ שוב")
     total = sum(r_["amount"] for r_ in p["rows"])
     return render_template("preview.html", p=p, token=token, total=total,
-                           channel=engine.channel())
+                           channel=engine.channel(),
+                           sms=sms_guard(p["rows"], p["month"]))
 
 
 @app.post("/run")
@@ -290,13 +295,26 @@ def start_run():
         return r
     check_csrf()
     token = request.form.get("token", "")
-    p = PENDING.pop(token, None)
+    p = PENDING.get(token)
     if not p:
         return render_template("dashboard_error.html",
                                error="ההעלאה פגה — להעלות את הקובץ שוב")
     if not p["rows"]:
         return render_template("dashboard_error.html", error="אין שורות תקינות להפקה")
     limit = 1 if request.form.get("trial") == "1" else 0
+    if not limit:
+        # שומר יתרה: גל שנגמר באמצע = עובדים עם מסמך בספרים ובלי הודעה (אין שליחה חוזרת).
+        # ההעלאה נשארת בזיכרון — אחרי הטעינה חוזרים לתצוגה המקדימה ומאשרים שוב.
+        g = sms_guard(p["rows"], p["month"])
+        if g and g["blocked"]:
+            return render_template(
+                "dashboard_error.html",
+                error=(f"יתרת ה-SMS לא מספיקה לגל הזה: נדרש ≈ ${g['usd']:.2f} "
+                       f"({g['messages']} הודעות · {g['segments']} מקטעים), "
+                       f"בחשבון Twilio יש ${g['balance']:.2f}. "
+                       "להטעין את Twilio ואז לחזור לתצוגה המקדימה ולאשר שוב. "
+                       "ריצת ניסיון של שורה אחת אפשרית גם עכשיו."))
+    PENDING.pop(token, None)
     run_id = uuid.uuid4().hex[:12]
     state = engine.RunState(run_id=run_id, month=p["month"],
                             started=now_il().isoformat(timespec="seconds"))
@@ -369,6 +387,56 @@ def test_message():
                            channel=engine.channel())
 
 
+# ------------------------------------------------------- לינק קצר מה-SMS
+_GI_CACHE: dict = {"headers": None, "ts": 0.0}
+_GI_CACHE_LOCK = threading.Lock()
+
+
+def gi_headers_cached(force: bool = False) -> dict:
+    """טוקן חשבונית ירוקה לשימוש חוזר (25 דק') — לא מתחברים מחדש על כל לחיצה על לינק."""
+    with _GI_CACHE_LOCK:
+        if not force and _GI_CACHE["headers"] and time.time() - _GI_CACHE["ts"] < 1500:
+            return _GI_CACHE["headers"]
+        h = engine.gi_token()
+        _GI_CACHE.update(headers=h, ts=time.time())
+        return h
+
+
+def sms_guard(rows: list, month: str):
+    """אומדן עלות ההודעות מול יתרת Twilio. None כשלא רלוונטי (ערוץ אחר / אין שורות)."""
+    if engine.channel() != "twilio" or not rows:
+        return None
+    est = engine.sms_wave_estimate(rows, month)
+    bal = engine.twilio_balance()
+    est["balance"] = bal
+    est["blocked"] = bal is not None and bal < est["usd"]
+    est["short_links"] = engine.short_links_enabled()
+    return est
+
+
+@app.get("/d/<token>")
+def short_doc(token):
+    """הלינק הקצר מה-SMS → הפניה ללינק החתום הטרי של המסמך בחשבונית ירוקה.
+    ציבורי (בלי לוגין): ה-token חתום ב-HMAC על SECRET_KEY ואינו ניתן לניחוש;
+    המסמך עצמו מוגש ע"י חשבונית ירוקה, לא מכאן."""
+    doc_id = engine.resolve_short_token(token)
+    if not doc_id:
+        abort(404)
+    url = ""
+    for attempt in (0, 1):
+        try:
+            url = engine.gi_doc_url(gi_headers_cached(force=bool(attempt)), doc_id)
+            break
+        except Exception:
+            url = ""          # טוקן פג / תקלה זמנית — ניסיון אחד נוסף עם טוקן טרי
+    if not url:
+        return render_template("link_wait.html"), 503
+    resp = redirect(url, code=302)
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    return resp
+
+
 @app.get("/report/<run_id>")
 def report(run_id):
     if (r := require_login()):
@@ -378,6 +446,23 @@ def report(run_id):
         return render_template("dashboard_error.html",
                                error="הדוח לא בזיכרון (אחרי עדכון גרסה) — הנתונים המלאים בחשבונית ירוקה")
     return render_template("report.html", state=state)
+
+
+# ------------------------------------------------------------- keep-alive
+# Render free מרדים את השירות אחרי 15 דק' בלי תעבורה — והעובד שלוחץ על הלינק
+# מההודעה מחכה ~30 שניות. פינג עצמי כל 10 דק' (רק בענן; KEEP_ALIVE=0 מכבה).
+def _keep_alive_loop():
+    url = os.getenv("KEEP_ALIVE_URL", f"{engine.PUBLIC_BASE_URL}/health")
+    while True:
+        time.sleep(600)
+        try:
+            urllib.request.urlopen(url, timeout=20).read()
+        except Exception:
+            pass
+
+
+if os.getenv("KEEP_ALIVE", "1") == "1" and os.getenv("RENDER"):
+    threading.Thread(target=_keep_alive_loop, daemon=True, name="keep-alive").start()
 
 
 if __name__ == "__main__":

@@ -15,6 +15,14 @@
     ⚠ ערוץ ההודעות עדיין לא הופעל — החשבוניות יופקו בחשבונית ירוקה אבל לא תישלח הודעה ללקוח.
   </div>
   {% endif %}
+  {% if sms %}
+  <div class="{{ 'error-box' if sms.blocked else 'ok-box' }}">
+    📱 SMS: {{ sms.messages }} הודעות · {{ sms.segments }} מקטעים · עלות משוערת ≈ ${{ '%.2f'|format(sms.usd) }}
+    {% if sms.balance is not none %} · יתרת Twilio: ${{ '%.2f'|format(sms.balance) }}{% else %} · יתרת Twilio לא זמינה כרגע{% endif %}
+    {% if sms.blocked %}<br><b>היתרה לא מספיקה לגל הזה</b> — להטעין את חשבון Twilio, לחזור לדף הזה ולאשר. ריצת ניסיון (שורה אחת) אפשרית כבר עכשיו.{% endif %}
+    {% if not sms.short_links %}<br>⚠ הלינק הקצר כבוי (אין SECRET_KEY) — כל הודעה תעלה 3 מקטעים.{% endif %}
+  </div>
+  {% endif %}
   {% if p.rows and not p.get('has_gmt') %}
   <div class="error-box" style="background:#fbf3e2;border-color:#e8d5a8;color:#8a6a1f">
     ℹ בקובץ אין נתוני חשבון GMT — הקבלות יופקו בלי פרט זה. אפשר להוסיף עמודה "מספר חשבון GMT" בעתיד.

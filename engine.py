@@ -12,6 +12,7 @@ engine.py — ליבת מערכת החיובים של ג.ד. פיקה הולדי
   את כל מסמכי החודש ומדלגים על טלפון שכבר קיבל מסמך. עמיד גם ב-redeploy בענן
   (אין תלות בדיסק מקומי).
 - ההודעה ללקוח נשלחת רק אחרי שהמסמך הופק בהצלחה.
+- SMS = מקטע אחד: לינק קצר חתום (/d/<token>) במקום הלינק הארוך של חשבונית ירוקה.
 
 כל הסודות ב-env בלבד: SIM_BILLING_GI_KEY/SECRET, INFORU_USER/TOKEN,
 GREEN_API_BOT_INSTANCE_ID/TOKEN.
@@ -23,6 +24,12 @@ import io
 import re
 import csv
 import calendar
+import hmac
+import uuid
+import base64
+import hashlib
+import binascii
+import unicodedata
 from datetime import datetime
 from dataclasses import dataclass, field
 
@@ -53,14 +60,148 @@ MESSAGE_TEMPLATE = os.getenv("MESSAGE_TEMPLATE",
     "({month}). Your document: {link}\nG.D. Pika Holdings")
 
 # ל-SMS: הודעה קומפקטית באנגלית (עברית כופה קידוד UCS-2 — 70 תווים למקטע במקום
-# 160 — והתבנית המלאה הייתה עולה ~5 מקטעים בתשלום לכל עובד)
+# 160 — והתבנית המלאה הייתה עולה ~5 מקטעים בתשלום לכל עובד).
+# לקח מריצת 17/08/2026: הלינק החתום של חשבונית ירוקה הוא ~290 תווים ⇒ כל הודעה
+# הייתה 3 מקטעים (142 הודעות = $86.52). עם הלינק הקצר (/d/<token>, למטה) והתבנית
+# הזו ההודעה נכנסת למקטע אחד — שליש מהעלות.
 SMS_MESSAGE_TEMPLATE = os.getenv("SMS_MESSAGE_TEMPLATE",
-    "G.D. Pika: {name}, your mobile line receipt for {month} ({amount} ILS): {link}")
+    "G.D. Pika: {name}, receipt {month} ({amount} ILS): {link}")
+SMS_NAME_MAX = 40   # שם ארוך יותר נחתך — שומר על מקטע אחד גם עם השם הארוך בקובץ
+
+SMS_CHANNELS = ("inforu", "twilio")
+
+
+def sms_safe_name(name: str) -> str:
+    """שם ל-SMS: ASCII בלבד (תו יחיד מחוץ ל-GSM-7 מקפיץ את כל ההודעה ל-UCS-2 —
+    70 תווים למקטע), חתוך ל-SMS_NAME_MAX."""
+    folded = unicodedata.normalize("NFKD", str(name or ""))
+    ascii_ = "".join(c for c in folded if c.isascii() and (c.isalnum() or c in " .'-"))
+    ascii_ = re.sub(r"\s+", " ", ascii_).strip()
+    if not re.search(r"[A-Za-z0-9]", ascii_):
+        ascii_ = "Customer"
+    return ascii_[:SMS_NAME_MAX].rstrip()
 
 
 def build_message(name: str, amount, month: str, link: str) -> str:
-    tpl = SMS_MESSAGE_TEMPLATE if channel() in ("inforu", "twilio") else MESSAGE_TEMPLATE
-    return tpl.format(name=name, amount=amount, month=month, link=link)
+    if channel() in SMS_CHANNELS:
+        return SMS_MESSAGE_TEMPLATE.format(name=sms_safe_name(name), amount=amount,
+                                           month=month, link=link)
+    return MESSAGE_TEMPLATE.format(name=name, amount=amount, month=month, link=link)
+
+
+# --------------------------------------------------------- מקטעי SMS ועלות
+# טבלת GSM 03.38 (בסיסית + מורחבת). כל תו אחר ⇒ UCS-2.
+_GSM7 = set("@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?"
+            "¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà")
+_GSM7_EXT = set("^{}\\[~]|€")
+SMS_SEGMENT_COST_USD = float(os.getenv("SMS_SEGMENT_COST_USD", "0.26"))  # Twilio→IL, נמדד 08/2026
+
+
+def sms_segments(text: str) -> int:
+    """כמה מקטעי SMS (בתשלום) ההודעה תופסת — אותו חישוב כמו אצל הספק."""
+    if all(c in _GSM7 or c in _GSM7_EXT for c in text):
+        n = sum(2 if c in _GSM7_EXT else 1 for c in text)
+        return 1 if n <= 160 else -(-n // 153)
+    n = len(text)
+    return 1 if n <= 70 else -(-n // 67)
+
+
+def sms_wave_estimate(rows: list[dict], month: str) -> dict:
+    """אומדן לפני ריצה: מקטעים ועלות של כל ההודעות בגל (עם הלינק שבאמת יישלח)."""
+    if short_links_enabled():
+        sample_link = f"{PUBLIC_BASE_URL}/d/" + "x" * SHORT_TOKEN_LEN
+    else:
+        sample_link = "https://www.greeninvoice.co.il/api/v1/documents/download?d=" + "x" * 230
+    segs = 0
+    for r in rows:
+        segs += sms_segments(build_message(r["name"], f"{r['amount']:g}", month, sample_link))
+    return {"messages": len(rows), "segments": segs,
+            "usd": round(segs * SMS_SEGMENT_COST_USD, 2),
+            "per_message": (segs / len(rows)) if rows else 0}
+
+
+def twilio_balance() -> float | None:
+    """יתרת Twilio בדולרים; None אם לא twilio או שה-API לא ענה (fail-open — לא חוסם ריצה)."""
+    if channel() != "twilio":
+        return None
+    sid = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
+    tok = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
+    if not sid or not tok:
+        return None
+    try:
+        r = requests.get(f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Balance.json",
+                         auth=(sid, tok), timeout=15)
+        if r.ok:
+            return float((r.json() or {}).get("balance") or 0)
+    except Exception:
+        pass
+    return None
+
+
+# ------------------------------------------------------------ לינק קצר ל-SMS
+# ה-token = מזהה המסמך (UUID, 16 בייט) ב-base64url (22 תווים) + 8 תווי חתימת HMAC
+# על SECRET_KEY. בלי מסד נתונים ובלי שירות קיצור חיצוני: בלחיצה השרת שולף מחשבונית
+# ירוקה את הלינק החתום הטרי של המסמך ומפנה אליו (app.py: /d/<token>).
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://pika-billing.onrender.com").rstrip("/")
+SHORT_TOKEN_LEN = 30
+
+
+def _link_secret() -> bytes:
+    return os.getenv("SECRET_KEY", "").encode("utf-8")
+
+
+def short_links_enabled() -> bool:
+    return os.getenv("SHORT_LINKS", "1") == "1" and bool(_link_secret())
+
+
+def _tag(body: str) -> str:
+    sig = hmac.new(_link_secret(), body.encode("ascii"), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(sig).decode("ascii")[:8]
+
+
+def short_token(doc_id: str) -> str:
+    body = base64.urlsafe_b64encode(uuid.UUID(str(doc_id)).bytes).decode("ascii").rstrip("=")
+    return body + _tag(body)
+
+
+def short_link(doc_id: str) -> str:
+    """הלינק הקצר למסמך, או '' אם כבוי / אין SECRET_KEY / המזהה לא UUID — הקורא
+    נופל ללינק המלא של חשבונית ירוקה."""
+    if not short_links_enabled():
+        return ""
+    try:
+        return f"{PUBLIC_BASE_URL}/d/{short_token(doc_id)}"
+    except (ValueError, AttributeError, TypeError):
+        return ""
+
+
+def resolve_short_token(token: str) -> str | None:
+    """token → מזהה מסמך, או None אם החתימה לא תקפה."""
+    if not token or len(token) != SHORT_TOKEN_LEN or not _link_secret():
+        return None
+    body, tag = token[:22], token[22:]
+    if not re.fullmatch(r"[A-Za-z0-9_-]{22}", body) or not hmac.compare_digest(tag, _tag(body)):
+        return None
+    try:
+        return str(uuid.UUID(bytes=base64.urlsafe_b64decode(body + "==")))
+    except (ValueError, binascii.Error):
+        return None
+
+
+def gi_doc_url(headers, doc_id: str) -> str:
+    """הלינק החתום הטרי של מסמך קיים (לצורך ההפניה מהלינק הקצר)."""
+    g = requests.get(f"{GI_BASE}/documents/{doc_id}", headers=headers, timeout=30)
+    if g.status_code == 401:
+        raise GiError("טוקן חשבונית ירוקה פג")
+    if g.ok:
+        u = _extract_url(g.json() or {})
+        if u:
+            return u
+    g = requests.get(f"{GI_BASE}/documents/{doc_id}/download/links", headers=headers, timeout=30)
+    if g.ok:
+        b2 = g.json() or {}
+        return b2.get("origin") or b2.get("url") or _extract_url(b2) or ""
+    return ""
 
 # ערוץ שליחה: dry (בלי הודעות) | inforu (SMS) | whatsapp (Green API)
 def channel() -> str:
@@ -482,8 +623,10 @@ def execute_run(state: RunState, rows: list[dict], month: str, limit: int = 0):
                 doc_id, doc_num, url = gi_create_doc(headers, r, month)
                 item["doc_number"] = doc_num or doc_id
                 item["doc_url"] = url
-                msg = build_message(r["name"], f"{r['amount']:g}", month,
-                                    url or "(link will follow)")
+                # ל-SMS: לינק קצר (מקטע אחד); לוואטסאפ ולדוח: הלינק המלא
+                msg_link = (short_link(doc_id) if channel() in SMS_CHANNELS else "") \
+                    or url or "(link will follow)"
+                msg = build_message(r["name"], f"{r['amount']:g}", month, msg_link)
                 try:
                     item["delivery"] = send_message(r["phone"], msg)
                 except Exception as se:

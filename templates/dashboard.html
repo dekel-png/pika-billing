@@ -9,7 +9,10 @@
 
 <div class="stat-row">
   <div class="stat"><div class="num">{{ billed_count }}</div><div class="lbl">לקוחות שכבר קיבלו חשבונית החודש ({{ month }})</div></div>
-  <div class="stat"><div class="num">{% if channel == 'inforu' %}SMS{% elif channel == 'whatsapp' %}וואטסאפ{% else %}כבוי{% endif %}</div><div class="lbl">ערוץ הודעות ללקוח{% if channel == 'dry' %} — מסמכים מופקים, הודעות עדיין לא נשלחות{% endif %}</div></div>
+  <div class="stat"><div class="num">{% if channel in ('inforu', 'twilio') %}SMS{% elif channel == 'whatsapp' %}וואטסאפ{% else %}כבוי{% endif %}</div><div class="lbl">ערוץ הודעות ללקוח{% if channel == 'dry' %} — מסמכים מופקים, הודעות עדיין לא נשלחות{% endif %}</div></div>
+  {% if sms_balance is not none %}
+  <div class="stat"><div class="num">${{ '%.2f'|format(sms_balance) }}</div><div class="lbl">יתרת SMS (Twilio) · מספיק ל-≈{{ (sms_balance / segment_cost)|int }} הודעות של מקטע אחד</div></div>
+  {% endif %}
 </div>
 
 <div class="card">

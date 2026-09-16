@@ -21,7 +21,12 @@
 | `SECRET_KEY` | מפתח סשן של Flask |
 | `ADMIN_PASSWORD` / `MANAGER_PASSWORD` | כניסת דקל / מנהל החיובים |
 | `SIM_BILLING_GI_KEY` / `SIM_BILLING_GI_SECRET` | API חשבונית ירוקה של ג.ד. פיקה |
-| `SEND_CHANNEL` | `dry` (בלי הודעות) / `inforu` (SMS) / `whatsapp` (Green API) |
+| `SEND_CHANNEL` | `dry` (בלי הודעות) / `twilio` (SMS, חי בפרוד) / `inforu` (SMS) / `whatsapp` (Green API) |
+| `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_FROM` | ספק SMS (אם twilio); שולח אלפאנומרי `GDPIKA` |
+| `PUBLIC_BASE_URL` | כתובת האתר ללינק הקצר (ברירת מחדל https://pika-billing.onrender.com) |
+| `SHORT_LINKS` | `1` (ברירת מחדל) — לינק קצר חתום ב-SMS; `0` = הלינק המלא של חשבונית ירוקה |
+| `SMS_SEGMENT_COST_USD` | עלות מקטע SMS לאומדן ושומר היתרה (ברירת מחדל 0.26) |
+| `KEEP_ALIVE` | `1` (ברירת מחדל) — פינג עצמי כל 10 דק' בענן כדי שהלינק ייפתח מיד; `0` מכבה |
 | `INFORU_USER` / `INFORU_TOKEN` | ספק SMS (אם inforu) |
 | `GREEN_API_BOT_INSTANCE_ID` / `GREEN_API_BOT_TOKEN` | וואטסאפ (אם whatsapp) |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | דיווח ריצות לדקל |
@@ -31,3 +36,22 @@
 
 מקור המנוע: `my-aios/build/sim-billing/` (גרסת CLI, 06/08/2026). מהרגע שהריפו הזה
 באוויר — **הריפו הזה הוא מקור האמת** של לוגיקת החיוב.
+
+## SMS: לינק קצר, עלות ושומר יתרה (16/09/2026)
+- **הלקח מריצת 17/08/2026**: 142 הודעות עלו $86.52 כי הלינק החתום של חשבונית ירוקה
+  הוא ~290 תווים ⇒ 3 מקטעי SMS להודעה. מאז ההודעה היא **מקטע אחד**:
+  `G.D. Pika: {name}, receipt {month} ({amount} ILS): https://pika-billing.onrender.com/d/<token>`
+  — השם מקופל ל-ASCII ונחתך ל-40 תווים (תו אחד מחוץ ל-GSM-7 היה מקפיץ הכול ל-UCS-2).
+- **הלינק הקצר** `/d/<token>`: token = מזהה המסמך (UUID) ב-base64url + חתימת HMAC על
+  `SECRET_KEY`. בלי מסד נתונים ובלי שירות קיצור חיצוני — בלחיצה השרת שולף מחשבונית
+  ירוקה את הלינק החתום הטרי ומפנה אליו. ציבורי אך לא ניתן לניחוש; המסמך מוגש ע"י
+  חשבונית ירוקה. הדוח באתר ממשיך להציג את הלינק המלא.
+- **שומר יתרה**: בתצוגה המקדימה מוצגים מספר ההודעות, המקטעים, האומדן בדולרים ויתרת
+  Twilio; ריצה מלאה נחסמת כשהיתרה נמוכה מהאומדן (ההעלאה נשמרת — מטעינים ומאשרים שוב).
+  ריצת ניסיון של שורה אחת תמיד אפשרית. תקלה ב-API של Twilio = fail-open (לא חוסם).
+- **Keep-alive**: Render free מרדים את השירות אחרי 15 דק'; פינג עצמי כל 10 דק' כדי
+  שהעובד שלוחץ על הלינק לא יחכה 30 שניות. `KEEP_ALIVE=0` מכבה.
+
+## בדיקות
+`python -m unittest discover -s tests -t . -v` — לינק קצר (round-trip, חתימה מזויפת, קלט זבל), מקטעי SMS
+(גבולות GSM-7/UCS-2), התבנית נשארת מקטע אחד גם עם שם ארוך, אומדן גל.
