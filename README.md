@@ -58,6 +58,15 @@
 `python -m unittest discover -s tests -t . -v` — לינק קצר (round-trip, חתימה מזויפת, קלט זבל), מקטעי SMS
 (גבולות GSM-7/UCS-2), התבנית נשארת מקטע אחד גם עם שם ארוך, אומדן גל.
 
+## תלויות ו-CI (11/10/2026)
+- `requirements.in` = התלויות הישירות (עורכים רק אותו). `requirements.txt` = **הנעילה המלאה** (כולל
+  תלויות עקיפות) — זה מה ש-Render מתקין, כך ש-CI, Render והתקנה מקומית מקבלים בדיוק אותו סט.
+  אחרי שינוי: `uv pip compile requirements.in -o requirements.txt --universal --python-version 3.12`.
+- `.github/workflows/tests.yml`: 38 בדיקות היחידה + `pip-audit` על הנעילה — על כל PR ועל כל push ל-main.
+  main נפרס אוטומטית ל-Render (מערכת כסף) ⇒ שינוי נכנס דרך PR ירוק בלבד.
+- `.github/workflows/security.yml`: gitleaks (סודות) על PR/push + סריקת היסטוריה מלאה שבועית.
+- Dependabot: pip + github-actions, שבועי.
+
 ## שליחה חוזרת של הודעות בלבד (16/09/2026)
 - **"שליחת הודעות בלבד"** (סימון בטופס ההעלאה): לא מופק שום מסמך — לכל שורה בקובץ המערכת
   מאתרת בחשבונית ירוקה את המסמך הקיים לחודש הנבחר (לפי טלפון/דרכון) ושולחת את ההודעה עם

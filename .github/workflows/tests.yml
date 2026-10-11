@@ -1,0 +1,74 @@
+name: tests
+# A money system (real tax invoices via Green Invoice + SMS) that Render
+# auto-deploys from main: every pull request into main and every push to main
+# runs the unit tests on the exact pinned set Render installs, plus a CVE audit
+# of that set. Red on main opens an issue.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read   # an explicit permissions block zeroes the defaults - checkout needs this
+  issues: write
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install the lock (requirements.txt is the compiled, fully pinned set)
+        run: pip install -r requirements.txt
+      - name: Unit tests (short links, SMS segments, wave estimate, guards)
+        env:
+          PYTHONUTF8: "1"
+        run: python -m unittest discover -s tests -t . -v
+
+  pip-audit:
+    # A known CVE in what production installs must be LOUD - deliberately no || true.
+    # --no-deps --disable-pip: audit exactly the pinned lines (transitive deps included).
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: pip-audit on the lock
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt --no-deps --disable-pip --progress-spinner off
+
+  alert:
+    needs: [unit, pip-audit]
+    if: failure() && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const open = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              labels: 'ci-red', state: 'open'});
+            if (open.data.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title: 'tests or pip-audit failed on main - billing may have a bad deploy',
+                labels: ['ci-red'],
+                body: 'Commit ' + context.sha.slice(0, 7) + ' failed the unit tests or pip-audit.\n\n' +
+                      'Render deploys main on push: check https://pika-billing.onrender.com ' +
+                      'and roll back in the Render dashboard before any billing run.\n\n' +
+                      'Run: ' + context.serverUrl + '/' + context.repo.owner + '/' +
+                      context.repo.repo + '/actions/runs/' + context.runId});
+            }
