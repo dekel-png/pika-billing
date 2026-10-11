@@ -1,0 +1,17 @@
+# Dependency freshness + CVE patches as PRs. Every PR runs the 38 unit tests,
+# pip-audit and gitleaks before merge; main auto-deploys a money system - review first.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: sunday
+    open-pull-requests-limit: 5
+    labels: ["deps"]
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: sunday
+    labels: ["deps"]
