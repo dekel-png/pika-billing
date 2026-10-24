@@ -318,18 +318,19 @@ class LoginLogTests(_Base):
                 os.environ[k] = v
         super().tearDown()
 
-    def post_login(self, password, cf=REAL, xff=RENDER_XFF, peer="127.0.0.1"):
+    def post_login(self, password, cf=REAL, xff=RENDER_XFF, peer="127.0.0.1", client=None):
         import contextlib
         import io as _io
-        with self.client.session_transaction() as s:
+        client = client or self.client
+        with client.session_transaction() as s:
             s["_csrf"] = "csrf-test"
         headers = {"X-Forwarded-For": xff, "X-Forwarded-Proto": "https"}
         if cf is not None:
             headers["CF-Connecting-IP"] = cf
         out = _io.StringIO()
         with contextlib.redirect_stdout(out):
-            r = self.client.post("/login", data={"_csrf": "csrf-test", "password": password},
-                                 headers=headers, environ_base={"REMOTE_ADDR": peer})
+            r = client.post("/login", data={"_csrf": "csrf-test", "password": password},
+                            headers=headers, environ_base={"REMOTE_ADDR": peer})
         return r, out.getvalue()
 
     def test_failed_login_logged_with_real_ip_and_no_password(self):
@@ -339,13 +340,13 @@ class LoginLogTests(_Base):
         for not_client in ("6.6.6.6", "172.68.10.20", "10.24.3.4", "127.0.0.1"):
             self.assertNotIn(not_client, log)       # hop מזויף / Cloudflare / Render — לא הלקוח
         self.assertNotIn(self.PW, log)
-        self.assertEqual(list(app_module._FAILED_LOGINS), [REAL])
+        self.assertEqual(sorted(app_module._FAILED_LOGINS), ["*", REAL])
 
     def test_spoofed_first_hop_does_not_mint_new_counter(self):
         for fake in ("1.1.1.1", "2.2.2.2", "3.3.3.3"):
             self.post_login(self.PW, xff=f"{fake}, {REAL}, 172.68.10.20, 10.24.3.4")
         self.assertEqual(len(app_module._FAILED_LOGINS[REAL]), 3)
-        self.assertEqual(list(app_module._FAILED_LOGINS), [REAL])
+        self.assertEqual(sorted(app_module._FAILED_LOGINS), ["*", REAL])
 
     def test_lockout_logged_and_blocks_only_that_client(self):
         log = ""
@@ -354,8 +355,9 @@ class LoginLogTests(_Base):
             log += out
         self.assertIn(f"login_failed ip={REAL} attempts={app_module.LOGIN_MAX_FAILURES}", log)
         self.assertEqual(log.count("login_locked"), 1)
+        self.assertIn(f"login_locked ip={REAL} scope=ip", log)
         r, out = self.post_login("admin-test-pw")        # גם סיסמה נכונה חסומה בזמן הנעילה
-        self.assertIn(f"login_blocked ip={REAL}", out)
+        self.assertIn(f"login_blocked ip={REAL} scope=ip", out)
         self.assertNotIn("login_ok", out)
         self.assertNotIn("admin-test-pw", out)
         self.assertEqual(r.status_code, 200)
@@ -372,6 +374,51 @@ class LoginLogTests(_Base):
         self.assertIn(f"login_ok ip={REAL} role=admin", log)
         self.assertNotIn("admin-test-pw", log)
         self.assertNotIn("login_failed", log)
+
+    def test_ipv6_bucketed_per_64_but_logged_in_full(self):
+        a, b = "2001:db8:1:2::a", "2001:db8:1:2:ffff::b"     # אותו ‎/64
+        _, log = self.post_login(self.PW, cf=a, xff=f"{a}, 172.68.10.20, 10.24.3.4")
+        self.post_login(self.PW, cf=b, xff=f"{b}, 172.68.10.20, 10.24.3.4")
+        self.assertIn(f"login_failed ip={a} attempts=1", log)
+        self.assertEqual(len(app_module._FAILED_LOGINS["2001:db8:1:2::/64"]), 2)
+
+    def test_global_brake_blocks_unknown_browsers_not_known_ones(self):
+        tg = []
+        self.patch(app_module, "notify_telegram", lambda text: tg.append(text))
+        known_browser = app_module.app.test_client()
+        r, _ = self.post_login("manager-test-pw", cf="198.51.100.77", client=known_browser)
+        self.assertEqual(r.status_code, 302)
+        self.assertIn(app_module.KNOWN_COOKIE, r.headers.get("Set-Cookie", ""))
+        self.assertIn("HttpOnly", r.headers.get("Set-Cookie", ""))
+        log = ""
+        for i in range(app_module.LOGIN_GLOBAL_MAX):       # ניחוש מבוזר: כל כתובת מתחת ל-15
+            _, out = self.post_login(self.PW, cf=f"192.0.2.{i + 1}")
+            log += out
+        self.assertEqual(log.count("login_locked"), 1)
+        self.assertIn("scope=global", log)
+        import threading
+        for _ in range(200):                                 # ההתראה בטלגרם רצה בת'רד
+            if tg:
+                break
+            threading.Event().wait(0.01)
+        self.assertEqual(len(tg), 1)
+        r, out = self.post_login("admin-test-pw", cf="203.0.113.200")   # דפדפן לא מוכר, כתובת חדשה
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("login_blocked ip=203.0.113.200 scope=global known=0", out)
+        r, out = self.post_login("manager-test-pw", cf="198.51.100.77", client=known_browser)
+        self.assertEqual(r.status_code, 302)                 # הדפדפן המוכר נכנס כרגיל
+        self.assertIn("login_ok ip=198.51.100.77 role=manager known=1", out)
+
+    def test_forged_known_cookie_is_ignored(self):
+        with app_module.app.test_request_context(headers={"Cookie": f"{app_module.KNOWN_COOKIE}=1.forged.sig"}):
+            self.assertFalse(app_module.is_known_device())
+
+    def test_idle_keys_pruned(self):
+        old = 1.0                                             # 1970 — מחוץ לכל חלון
+        for i in range(app_module._GC_AT + 5):
+            app_module._FAILED_LOGINS[f"10.9.{i // 250}.{i % 250}"] = [old]
+        self.post_login(self.PW)
+        self.assertEqual(sorted(app_module._FAILED_LOGINS), ["*", REAL])
 
     def test_public_peer_ignores_forwarding_headers(self):
         _, log = self.post_login(self.PW, peer="198.51.100.20")

@@ -108,9 +108,17 @@ APP_NAME = "מערכת חיובים — ג.ד. פיקה"
 PENDING: dict[str, dict] = {}     # token -> {rows, bad, filename, month, ts}
 RUNS: dict[str, engine.RunState] = {}
 _RUNS_LOCK = threading.Lock()
-_FAILED_LOGINS: dict[str, list] = {}   # ip -> [timestamps]
-LOGIN_MAX_FAILURES = 15                 # ניסיונות כושלים לכל IP...
+_FAILED_LOGINS: dict[str, list] = {}   # throttle_key(ip) / "*" -> [timestamps]
+LOGIN_MAX_FAILURES = 15                 # ניסיונות כושלים לכל IP (IPv6: לכל ‎/64)...
 LOGIN_WINDOW_SEC = 900                  # ...בחלון של רבע שעה
+# בלם אחרון נגד ניחוש מבוזר (הרבה כתובות): כישלונות מכל הכתובות יחד. לא חל על דפדפן שכבר
+# נכנס בהצלחה (עוגיית "מכשיר מוכר" חתומה) — כך תוקף לא נועל את מנהל החיובים מחוץ למערכת.
+# אותו מודל כמו בלם שם-המשתמש בדשבורד (PR #26).
+LOGIN_GLOBAL_MAX = 50
+_GLOBAL_KEY = "*"
+_GC_AT = 1000                           # ניקוי מפתחות רדומים כשהטבלה גדלה מעבר לזה
+KNOWN_COOKIE = "pb_known_device"
+KNOWN_MAX_AGE = 180 * 24 * 3600
 
 
 # ------------------------------------------------------------------ עזרים
@@ -125,17 +133,65 @@ def client_ip() -> str:
     return request.remote_addr or "?"
 
 
-def login_throttled(ip: str) -> bool:
-    window = [t for t in _FAILED_LOGINS.get(ip, []) if time.time() - t < LOGIN_WINDOW_SEC]
-    _FAILED_LOGINS[ip] = window
-    return len(window) >= LOGIN_MAX_FAILURES
+def throttle_key(ip: str) -> str:
+    """מפתח ההאטה לכתובת: IPv4 כמו שהיא, IPv6 לפי ‎/64 (מכונה אחת מחזיקה בדרך כלל ‎/64 שלם)."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if addr.version == 6:
+        if addr.ipv4_mapped:
+            return str(addr.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False))
+    return str(addr)
 
 
-def record_failure(ip: str) -> int:
-    """רושם כישלון ומחזיר את מספר הכישלונות של ה-IP בחלון הנוכחי."""
-    hits = _FAILED_LOGINS.setdefault(ip, [])
-    hits.append(time.time())
-    return len(hits)
+def _hits(key: str, now: float) -> list:
+    """הכישלונות של המפתח בחלון הנוכחי; מפתח שהתרוקן נמחק מהטבלה."""
+    hits = [t for t in _FAILED_LOGINS.get(key, []) if now - t < LOGIN_WINDOW_SEC]
+    if hits:
+        _FAILED_LOGINS[key] = hits
+    else:
+        _FAILED_LOGINS.pop(key, None)
+    return hits
+
+
+def login_throttled(ip: str, known_device: bool = False) -> str | None:
+    """איזה בלם סגור: "ip" (הכתובת הזאת), "global" (כולם יחד, רק לדפדפן לא מוכר) או None."""
+    now = time.time()
+    if len(_hits(throttle_key(ip), now)) >= LOGIN_MAX_FAILURES:
+        return "ip"
+    if not known_device and len(_hits(_GLOBAL_KEY, now)) >= LOGIN_GLOBAL_MAX:
+        return "global"
+    return None
+
+
+def record_failure(ip: str) -> tuple[int, int]:
+    """רושם כישלון; מחזיר (כישלונות הכתובת, כישלונות כולם) בחלון הנוכחי."""
+    now = time.time()
+    if len(_FAILED_LOGINS) > _GC_AT:
+        for k in list(_FAILED_LOGINS):
+            _hits(k, now)
+    key = throttle_key(ip)
+    _FAILED_LOGINS.setdefault(key, []).append(now)
+    _FAILED_LOGINS.setdefault(_GLOBAL_KEY, []).append(now)
+    return len(_FAILED_LOGINS[key]), len(_FAILED_LOGINS[_GLOBAL_KEY])
+
+
+def _known_signer():
+    from itsdangerous import URLSafeTimedSerializer
+    return URLSafeTimedSerializer(app.secret_key, salt="login-known-device")
+
+
+def is_known_device() -> bool:
+    """הדפדפן הזה כבר נכנס בהצלחה (עוגייה חתומה במפתח הסשן; זיוף/פג תוקף = לא מוכר)."""
+    raw = request.cookies.get(KNOWN_COOKIE)
+    if not raw:
+        return False
+    try:
+        return _known_signer().loads(raw, max_age=KNOWN_MAX_AGE) == 1
+    except Exception:
+        return False
 
 
 def security_log(event: str, ip: str, **fields) -> None:
@@ -226,8 +282,12 @@ def login():
     if request.method == "POST":
         check_csrf()
         ip = client_ip()
-        if login_throttled(ip):
-            security_log("login_blocked", ip, attempts=len(_FAILED_LOGINS.get(ip, [])))
+        known = is_known_device()
+        brake = login_throttled(ip, known)
+        if brake:
+            security_log("login_blocked", ip, scope=brake, known=int(known),
+                         attempts=len(_FAILED_LOGINS.get(
+                             throttle_key(ip) if brake == "ip" else _GLOBAL_KEY, [])))
             error = "יותר מדי ניסיונות. לנסות שוב בעוד רבע שעה."
         else:
             pw = request.form.get("password", "")
@@ -242,13 +302,23 @@ def login():
                 session.clear()
                 session["role"] = role
                 session["_csrf"] = uuid.uuid4().hex
-                security_log("login_ok", ip, role=role)
-                return redirect(url_for("dashboard"))
-            attempts = record_failure(ip)
-            security_log("login_failed", ip, attempts=attempts)
-            if attempts >= LOGIN_MAX_FAILURES:
-                security_log("login_locked", ip, attempts=attempts,
+                security_log("login_ok", ip, role=role, known=int(known))
+                resp = redirect(url_for("dashboard"))
+                resp.set_cookie(KNOWN_COOKIE, _known_signer().dumps(1), max_age=KNOWN_MAX_AGE,
+                                httponly=True, samesite="Lax",
+                                secure=app.config["SESSION_COOKIE_SECURE"])
+                return resp
+            attempts, total = record_failure(ip)
+            security_log("login_failed", ip, attempts=attempts, total=total, known=int(known))
+            if attempts == LOGIN_MAX_FAILURES:
+                security_log("login_locked", ip, scope="ip", attempts=attempts,
                              minutes=LOGIN_WINDOW_SEC // 60)
+            if total == LOGIN_GLOBAL_MAX:
+                security_log("login_locked", ip, scope="global", attempts=total,
+                             minutes=LOGIN_WINDOW_SEC // 60)
+                threading.Thread(target=notify_telegram, daemon=True, args=(
+                    f"⚠ מערכת החיובים: {total} כניסות כושלות ברבע שעה מכל הכתובות — "
+                    "הכניסה נחסמה לדפדפנים לא מוכרים לרבע שעה (דפדפן שכבר נכנס — עובד כרגיל).",)).start()
             time.sleep(1)
             error = "סיסמה שגויה"
     return render_template("login.html", error=error)
