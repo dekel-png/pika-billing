@@ -8,11 +8,16 @@ app.py — מערכת החיובים של ג.ד. פיקה הולדינגס בע"
 אבטחה: סיסמאות ב-env (ADMIN_PASSWORD לדקל, MANAGER_PASSWORD למנהל החיובים),
 CSRF על כל POST, האטת כניסות כושלות (מפתוח לפי IP אמיתי מאחורי פרוקסי Render —
 הלקח מתקרית הדשבורד 16/08), סשן חתום, אין סודות בקוד.
+הקשחה 21/10/2026: כותרות אבטחה על כל תגובה (HSTS, מסגור אסור, CSP בסיסי, nosniff,
+Referrer-Policy, no-store), ProxyFix כך ש-remote_addr הוא ה-IP האמיתי (גם בלוגים),
+ושורת לוג על כל ניסיון כניסה (login_failed / login_locked / login_blocked / login_ok) —
+בלי הסיסמה שהוקלדה.
 """
 
 from __future__ import annotations
 import os
 import io
+import re
 import csv
 import hmac
 import time
@@ -24,6 +29,7 @@ from datetime import datetime
 
 from flask import (Flask, render_template, request, redirect, url_for,
                    session, abort, Response, jsonify)
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 import engine
 
@@ -34,6 +40,10 @@ except Exception:
     IL_TZ = None
 
 app = Flask(__name__)
+# Render (ו-Cloudflare לפניו) מוסיף את ה-IP האמיתי כ-hop האחרון ב-X-Forwarded-For;
+# x_for=1 לוקח רק אותו (ערכים מוקדמים יותר נשלטים ע"י הלקוח ולכן לא אמינים).
+# כך request.remote_addr = ה-IP האמיתי — להאטת הכניסות ולשורות הלוג.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 app.secret_key = os.getenv("SECRET_KEY", "")
 if not app.secret_key:
     # בלי מפתח סשן אין התחברות בטוחה — נופלים למפתח אקראי (סשנים יתאפסו ברענון תהליך)
@@ -52,6 +62,8 @@ PENDING: dict[str, dict] = {}     # token -> {rows, bad, filename, month, ts}
 RUNS: dict[str, engine.RunState] = {}
 _RUNS_LOCK = threading.Lock()
 _FAILED_LOGINS: dict[str, list] = {}   # ip -> [timestamps]
+LOGIN_MAX_FAILURES = 15                 # ניסיונות כושלים לכל IP...
+LOGIN_WINDOW_SEC = 900                  # ...בחלון של רבע שעה
 
 
 # ------------------------------------------------------------------ עזרים
@@ -61,21 +73,29 @@ def now_il():
 
 
 def client_ip() -> str:
-    """ה-IP האמיתי מאחורי פרוקסי Render: הערך האחרון ב-XFF (חסין זיוף)."""
-    xff = request.headers.get("X-Forwarded-For", "")
-    if xff:
-        return xff.split(",")[-1].strip()
+    """ה-IP האמיתי מאחורי פרוקסי Render. ProxyFix (x_for=1) כבר הציב ב-remote_addr את
+    ה-hop האחרון ב-XFF — זה שהפרוקסי של Render הוסיף, ולכן חסין זיוף."""
     return request.remote_addr or "?"
 
 
 def login_throttled(ip: str) -> bool:
-    window = [t for t in _FAILED_LOGINS.get(ip, []) if time.time() - t < 900]
+    window = [t for t in _FAILED_LOGINS.get(ip, []) if time.time() - t < LOGIN_WINDOW_SEC]
     _FAILED_LOGINS[ip] = window
-    return len(window) >= 15
+    return len(window) >= LOGIN_MAX_FAILURES
 
 
-def record_failure(ip: str):
-    _FAILED_LOGINS.setdefault(ip, []).append(time.time())
+def record_failure(ip: str) -> int:
+    """רושם כישלון ומחזיר את מספר הכישלונות של ה-IP בחלון הנוכחי."""
+    hits = _FAILED_LOGINS.setdefault(ip, [])
+    hits.append(time.time())
+    return len(hits)
+
+
+def security_log(event: str, ip: str, **fields) -> None:
+    """שורת לוג אחת ל-stdout (נאסף ע"י Render). לעולם לא מעבירים לכאן סיסמה או סוד."""
+    safe_ip = re.sub(r"[^0-9A-Fa-f:.]", "", ip)[:64] or "?"
+    extra = "".join(f" {k}={v}" for k, v in fields.items())
+    print(f"{now_il().isoformat(timespec='seconds')} {event} ip={safe_ip}{extra}", flush=True)
 
 
 def csrf_token() -> str:
@@ -92,6 +112,30 @@ def check_csrf():
 
 app.jinja_env.globals["csrf_token"] = csrf_token
 app.jinja_env.globals["APP_NAME"] = APP_NAME
+
+
+# כותרות אבטחה על כל תגובה (כולל 404/500). כל הטפסים שולחים לאותו מקור ⇒ form-action 'self';
+# אין script-src בכוונה (run.html מריץ JS משובץ). ראוט שכבר קבע כותרת — נשאר בערך שלו.
+SECURITY_HEADERS = {
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+    "X-Frame-Options": "DENY",
+    "Content-Security-Policy": ("frame-ancestors 'none'; object-src 'none'; "
+                                "base-uri 'self'; form-action 'self'"),
+    "X-Content-Type-Options": "nosniff",
+}
+_TOKEN_URL_ARGS = ("token", "run_id")   # כתובות שנושאות טוקן/מזהה ריצה — בלי Referer בכלל
+
+
+@app.after_request
+def security_headers(resp):
+    for k, v in SECURITY_HEADERS.items():
+        resp.headers.setdefault(k, v)
+    token_url = any(k in (request.view_args or {}) for k in _TOKEN_URL_ARGS)
+    resp.headers.setdefault("Referrer-Policy", "no-referrer" if token_url else "same-origin")
+    # אין כאן תוכן ציבורי שכדאי לשמור במטמון: דפים מחוברים, לינקי טוקן, CSV וטופס עם CSRF
+    if request.endpoint != "static":
+        resp.headers.setdefault("Cache-Control", "no-store")
+    return resp
 
 
 def logged_in() -> bool:
@@ -135,6 +179,7 @@ def login():
         check_csrf()
         ip = client_ip()
         if login_throttled(ip):
+            security_log("login_blocked", ip, attempts=len(_FAILED_LOGINS.get(ip, [])))
             error = "יותר מדי ניסיונות. לנסות שוב בעוד רבע שעה."
         else:
             pw = request.form.get("password", "")
@@ -149,8 +194,13 @@ def login():
                 session.clear()
                 session["role"] = role
                 session["_csrf"] = uuid.uuid4().hex
+                security_log("login_ok", ip, role=role)
                 return redirect(url_for("dashboard"))
-            record_failure(ip)
+            attempts = record_failure(ip)
+            security_log("login_failed", ip, attempts=attempts)
+            if attempts >= LOGIN_MAX_FAILURES:
+                security_log("login_locked", ip, attempts=attempts,
+                             minutes=LOGIN_WINDOW_SEC // 60)
             time.sleep(1)
             error = "סיסמה שגויה"
     return render_template("login.html", error=error)
