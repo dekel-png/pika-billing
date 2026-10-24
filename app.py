@@ -119,6 +119,7 @@ _GLOBAL_KEY = "*"
 _GC_AT = 1000                           # ניקוי מפתחות רדומים כשהטבלה גדלה מעבר לזה
 KNOWN_COOKIE = "pb_known_device"
 KNOWN_MAX_AGE = 180 * 24 * 3600
+_GLOBAL_ALERT = {"ts": 0.0}             # התראת טלגרם על הבלם הכללי — לכל היותר אחת לחלון
 
 
 # ------------------------------------------------------------------ עזרים
@@ -316,9 +317,11 @@ def login():
             if total == LOGIN_GLOBAL_MAX:
                 security_log("login_locked", ip, scope="global", attempts=total,
                              minutes=LOGIN_WINDOW_SEC // 60)
-                threading.Thread(target=notify_telegram, daemon=True, args=(
-                    f"⚠ מערכת החיובים: {total} כניסות כושלות ברבע שעה מכל הכתובות — "
-                    "הכניסה נחסמה לדפדפנים לא מוכרים לרבע שעה (דפדפן שכבר נכנס — עובד כרגיל).",)).start()
+                if time.time() - _GLOBAL_ALERT["ts"] >= LOGIN_WINDOW_SEC:
+                    _GLOBAL_ALERT["ts"] = time.time()
+                    threading.Thread(target=notify_telegram, daemon=True, args=(
+                        f"⚠ מערכת החיובים: {total} כניסות כושלות ברבע שעה מכל הכתובות — "
+                        "הכניסה נחסמה לדפדפנים לא מוכרים לרבע שעה (דפדפן שכבר נכנס — עובד כרגיל).",)).start()
             time.sleep(1)
             error = "סיסמה שגויה"
     return render_template("login.html", error=error)

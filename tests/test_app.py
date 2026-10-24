@@ -306,6 +306,7 @@ class LoginLogTests(_Base):
         import time as _time
         self.patch(_time, "sleep", lambda s: None)      # ההשהיה של כישלון — לא בבדיקות
         self.patch(app_module, "_FAILED_LOGINS", {})
+        self.patch(app_module, "_GLOBAL_ALERT", {"ts": 0.0})
         self._env = {k: os.environ.get(k) for k in ("ADMIN_PASSWORD", "MANAGER_PASSWORD")}
         os.environ["ADMIN_PASSWORD"] = "admin-test-pw"
         os.environ["MANAGER_PASSWORD"] = "manager-test-pw"
@@ -408,6 +409,11 @@ class LoginLogTests(_Base):
         r, out = self.post_login("manager-test-pw", cf="198.51.100.77", client=known_browser)
         self.assertEqual(r.status_code, 302)                 # הדפדפן המוכר נכנס כרגיל
         self.assertIn("login_ok ip=198.51.100.77 role=manager known=1", out)
+        # התקפה מתמשכת: הספירה חוזרת ל-50 — אבל אין התראה נוספת באותו חלון
+        app_module._FAILED_LOGINS["*"].pop(0)
+        self.post_login(self.PW, cf="192.0.2.200")
+        threading.Event().wait(0.05)
+        self.assertEqual(len(tg), 1)
 
     def test_forged_known_cookie_is_ignored(self):
         with app_module.app.test_request_context(headers={"Cookie": f"{app_module.KNOWN_COOKIE}=1.forged.sig"}):
