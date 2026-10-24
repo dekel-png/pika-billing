@@ -9,7 +9,7 @@ app.py — מערכת החיובים של ג.ד. פיקה הולדינגס בע"
 CSRF על כל POST, האטת כניסות כושלות (מפתוח לפי IP אמיתי מאחורי פרוקסי Render —
 הלקח מתקרית הדשבורד 16/08), סשן חתום, אין סודות בקוד.
 הקשחה 21/10/2026: כותרות אבטחה על כל תגובה (HSTS, מסגור אסור, CSP בסיסי, nosniff,
-Referrer-Policy, no-store), ProxyFix כך ש-remote_addr הוא ה-IP האמיתי (גם בלוגים),
+Referrer-Policy, no-store), remote_addr = ה-IP האמיתי של הלקוח (behind_proxy, גם בלוגים),
 ושורת לוג על כל ניסיון כניסה (login_failed / login_locked / login_blocked / login_ok) —
 בלי הסיסמה שהוקלדה.
 """
@@ -22,6 +22,7 @@ import csv
 import hmac
 import time
 import uuid
+import ipaddress
 import threading
 import urllib.request
 import urllib.parse
@@ -39,11 +40,57 @@ try:
 except Exception:
     IL_TZ = None
 
+_RFC1918 = tuple(ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+
+
+def valid_ip(value) -> str | None:
+    """הכתובת בצורה מנורמלת, או None אם זה בכלל לא IP (כולל רשימה מופרדת בפסיקים)."""
+    try:
+        return str(ipaddress.ip_address((value or "").strip().strip("[]")))
+    except ValueError:
+        return None
+
+
+def is_trusted_peer(peer: str) -> bool:
+    """loopback או RFC1918 — כלומר פרוקסי שאנחנו יושבים מאחוריו (ב-Render: הפרוקסי שבתוך
+    הקונטיינר, 127.0.0.1, וה-hops הפנימיים 10.x). לא CGNAT 100.64/10 ולא link-local."""
+    ip = valid_ip(peer)
+    if ip is None:
+        return False
+    addr = ipaddress.ip_address(ip)
+    return addr.is_loopback or (addr.version == 4 and any(addr in n for n in _RFC1918))
+
+
+def behind_proxy(wsgi_app):
+    """remote_addr = ה-IP האמיתי של הלקוח, ו-https מאחורי הפרוקסי.
+
+    נמדד ב-staging של הדשבורד 25/10: ב-Render (ש-Cloudflare הוא הקצה שלו, גם ל-*.onrender.com)
+    העמית הוא 127.0.0.1/10.x ו-X-Forwarded-For = "[מה שהלקוח שלח…], לקוח, Cloudflare 172.68.x,
+    Render-פנימי 10.24.x" — ה-hop האחרון משותף לכולם (מונה האטה אחד לכל העולם). לכן:
+    - עמית loopback/פרטי: ה-IP מ-CF-Connecting-IP (Cloudflare קובע אותו ודוחה ב-403 עותק
+      שהלקוח שולח); רק אם הוא חסר/לא תקין — ה-hop האחרון ב-XFF (ProxyFix x_for=1).
+    - עמית ציבורי (גישה ישירה, בלי פרוקסי): כותרות ההעברה נמחקות ולא משפיעות.
+    gunicorn לא נוגע ב-REMOTE_ADDR ולא מוחק את XFF / CF-Connecting-IP; forwarded_allow_ips
+    (ברירת מחדל 127.0.0.1) משפיע רק על זיהוי ה-scheme, ו-header_map=drop זורק שמות כותרת עם "_"
+    (כך ש-CF_Connecting_IP מזויף לא מתמזג לאותו מפתח). הפרוטוקול: ProxyFix x_proto=1."""
+    by_last_hop = ProxyFix(wsgi_app, x_for=1, x_proto=1)
+    proto_only = ProxyFix(wsgi_app, x_for=0, x_proto=1)
+
+    def middleware(environ, start_response):
+        if not is_trusted_peer(environ.get("REMOTE_ADDR") or ""):
+            for k in ("HTTP_X_FORWARDED_FOR", "HTTP_X_FORWARDED_PROTO", "HTTP_CF_CONNECTING_IP"):
+                environ.pop(k, None)
+            return wsgi_app(environ, start_response)
+        cf = valid_ip(environ.get("HTTP_CF_CONNECTING_IP"))
+        if cf:
+            environ["REMOTE_ADDR"] = cf
+            return proto_only(environ, start_response)
+        return by_last_hop(environ, start_response)
+    return middleware
+
+
 app = Flask(__name__)
-# Render (ו-Cloudflare לפניו) מוסיף את ה-IP האמיתי כ-hop האחרון ב-X-Forwarded-For;
-# x_for=1 לוקח רק אותו (ערכים מוקדמים יותר נשלטים ע"י הלקוח ולכן לא אמינים).
-# כך request.remote_addr = ה-IP האמיתי — להאטת הכניסות ולשורות הלוג.
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
+app.wsgi_app = behind_proxy(app.wsgi_app)
 app.secret_key = os.getenv("SECRET_KEY", "")
 if not app.secret_key:
     # בלי מפתח סשן אין התחברות בטוחה — נופלים למפתח אקראי (סשנים יתאפסו ברענון תהליך)
@@ -73,8 +120,8 @@ def now_il():
 
 
 def client_ip() -> str:
-    """ה-IP האמיתי מאחורי פרוקסי Render. ProxyFix (x_for=1) כבר הציב ב-remote_addr את
-    ה-hop האחרון ב-XFF — זה שהפרוקסי של Render הוסיף, ולכן חסין זיוף."""
+    """ה-IP האמיתי של הלקוח — behind_proxy כבר הציב אותו ב-remote_addr (מ-CF-Connecting-IP
+    מאחורי הפרוקסי של Render; ה-hops שהלקוח שולח ב-XFF לא נחשבים)."""
     return request.remote_addr or "?"
 
 

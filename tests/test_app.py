@@ -291,8 +291,14 @@ class SecurityHeadersTests(_Base):
         self.assertEqual(r.headers.get("Referrer-Policy"), "no-referrer")
 
 
+# כך נראית בקשה ב-Render (נמדד ב-staging של הדשבורד 25/10): העמית הוא הפרוקסי שבתוך הקונטיינר,
+# ו-XFF = "[מה שהלקוח שלח], לקוח, קצה Cloudflare, Render-פנימי" — ה-hop האחרון משותף לכולם.
+REAL = "203.0.113.9"
+RENDER_XFF = "6.6.6.6, " + REAL + ", 172.68.10.20, 10.24.3.4"
+
+
 class LoginLogTests(_Base):
-    """כל ניסיון כניסה נרשם ל-stdout עם ה-IP האמיתי (ה-hop האחרון ב-XFF) — לעולם לא הסיסמה."""
+    """כל ניסיון כניסה נרשם ל-stdout עם ה-IP האמיתי (CF-Connecting-IP) — לעולם לא הסיסמה."""
     PW = "wrong-pass-Zq9"
 
     def setUp(self):
@@ -312,48 +318,126 @@ class LoginLogTests(_Base):
                 os.environ[k] = v
         super().tearDown()
 
-    def post_login(self, password, xff="198.51.100.7, 203.0.113.9"):
+    def post_login(self, password, cf=REAL, xff=RENDER_XFF, peer="127.0.0.1"):
         import contextlib
         import io as _io
         with self.client.session_transaction() as s:
             s["_csrf"] = "csrf-test"
+        headers = {"X-Forwarded-For": xff, "X-Forwarded-Proto": "https"}
+        if cf is not None:
+            headers["CF-Connecting-IP"] = cf
         out = _io.StringIO()
         with contextlib.redirect_stdout(out):
             r = self.client.post("/login", data={"_csrf": "csrf-test", "password": password},
-                                 headers={"X-Forwarded-For": xff})
+                                 headers=headers, environ_base={"REMOTE_ADDR": peer})
         return r, out.getvalue()
 
     def test_failed_login_logged_with_real_ip_and_no_password(self):
         r, log = self.post_login(self.PW)
         self.assertEqual(r.status_code, 200)
-        self.assertIn("login_failed ip=203.0.113.9 attempts=1", log)
-        self.assertNotIn("198.51.100.7", log)      # hop שהלקוח שלט בו — לא נחשב
+        self.assertIn(f"login_failed ip={REAL} attempts=1", log)
+        for not_client in ("6.6.6.6", "172.68.10.20", "10.24.3.4", "127.0.0.1"):
+            self.assertNotIn(not_client, log)       # hop מזויף / Cloudflare / Render — לא הלקוח
         self.assertNotIn(self.PW, log)
-        self.assertEqual(list(app_module._FAILED_LOGINS), ["203.0.113.9"])
+        self.assertEqual(list(app_module._FAILED_LOGINS), [REAL])
 
-    def test_lockout_logged_and_blocks(self):
+    def test_spoofed_first_hop_does_not_mint_new_counter(self):
+        for fake in ("1.1.1.1", "2.2.2.2", "3.3.3.3"):
+            self.post_login(self.PW, xff=f"{fake}, {REAL}, 172.68.10.20, 10.24.3.4")
+        self.assertEqual(len(app_module._FAILED_LOGINS[REAL]), 3)
+        self.assertEqual(list(app_module._FAILED_LOGINS), [REAL])
+
+    def test_lockout_logged_and_blocks_only_that_client(self):
         log = ""
         for _ in range(app_module.LOGIN_MAX_FAILURES):
             _, out = self.post_login(self.PW)
             log += out
-        self.assertIn(f"login_failed ip=203.0.113.9 attempts={app_module.LOGIN_MAX_FAILURES}", log)
+        self.assertIn(f"login_failed ip={REAL} attempts={app_module.LOGIN_MAX_FAILURES}", log)
         self.assertEqual(log.count("login_locked"), 1)
         r, out = self.post_login("admin-test-pw")        # גם סיסמה נכונה חסומה בזמן הנעילה
-        self.assertIn("login_blocked ip=203.0.113.9", out)
+        self.assertIn(f"login_blocked ip={REAL}", out)
         self.assertNotIn("login_ok", out)
         self.assertNotIn("admin-test-pw", out)
         self.assertEqual(r.status_code, 200)
-        # IP אחר לא מושפע מהנעילה
-        r, out = self.post_login("manager-test-pw", xff="203.0.113.50")
+        # לקוח אחר דרך אותו hop פנימי של Render (10.24.3.4) — לא מושפע מהנעילה
+        other = "198.51.100.50"
+        r, out = self.post_login("manager-test-pw", cf=other,
+                                 xff=f"{other}, 172.68.10.21, 10.24.3.4")
         self.assertEqual(r.status_code, 302)
-        self.assertIn("login_ok ip=203.0.113.50 role=manager", out)
+        self.assertIn(f"login_ok ip={other} role=manager", out)
 
     def test_success_logged_without_password(self):
         r, log = self.post_login("admin-test-pw")
         self.assertEqual(r.status_code, 302)
-        self.assertIn("login_ok ip=203.0.113.9 role=admin", log)
+        self.assertIn(f"login_ok ip={REAL} role=admin", log)
         self.assertNotIn("admin-test-pw", log)
         self.assertNotIn("login_failed", log)
+
+    def test_public_peer_ignores_forwarding_headers(self):
+        _, log = self.post_login(self.PW, peer="198.51.100.20")
+        self.assertIn("login_failed ip=198.51.100.20 attempts=1", log)
+        self.assertNotIn(REAL, log)
+
+
+class BehindProxyTests(unittest.TestCase):
+    """המידלוור עצמו: מאיפה נלקח ה-IP ומתי סומכים על כותרות ההעברה."""
+
+    def run_mw(self, peer, cf=None, xff=None, proto="https"):
+        seen = {}
+
+        def inner(environ, start_response):
+            seen.update(environ)
+            start_response("200 OK", [])
+            return [b""]
+        env = {"REMOTE_ADDR": peer, "wsgi.url_scheme": "http", "HTTP_HOST": "x"}
+        if cf is not None:
+            env["HTTP_CF_CONNECTING_IP"] = cf
+        if xff is not None:
+            env["HTTP_X_FORWARDED_FOR"] = xff
+        if proto is not None:
+            env["HTTP_X_FORWARDED_PROTO"] = proto
+        app_module.behind_proxy(inner)(env, lambda *a: None)
+        return seen
+
+    def test_render_loopback_peer_uses_cf_connecting_ip(self):
+        e = self.run_mw("127.0.0.1", cf=REAL, xff=RENDER_XFF)
+        self.assertEqual(e["REMOTE_ADDR"], REAL)
+        self.assertEqual(e["wsgi.url_scheme"], "https")
+
+    def test_render_internal_peer_uses_cf_connecting_ip(self):
+        e = self.run_mw("10.24.7.8", cf=REAL, xff=RENDER_XFF)
+        self.assertEqual(e["REMOTE_ADDR"], REAL)
+
+    def test_cf_missing_falls_back_to_last_hop(self):
+        e = self.run_mw("127.0.0.1", cf=None, xff="6.6.6.6, " + REAL)
+        self.assertEqual(e["REMOTE_ADDR"], REAL)
+        e = self.run_mw("127.0.0.1", cf=None, xff=RENDER_XFF)
+        self.assertEqual(e["REMOTE_ADDR"], "10.24.3.4")   # בלי Cloudflare: רק ה-hop האחרון אמין
+
+    def test_cf_invalid_falls_back_to_last_hop(self):
+        for bad in ("not-an-ip", "1.2.3.4, 5.6.7.8", ""):
+            e = self.run_mw("127.0.0.1", cf=bad, xff="6.6.6.6, " + REAL)
+            self.assertEqual(e["REMOTE_ADDR"], REAL, bad)
+
+    def test_cf_ipv6_normalised(self):
+        e = self.run_mw("127.0.0.1", cf="2001:DB8::0001", xff=RENDER_XFF)
+        self.assertEqual(e["REMOTE_ADDR"], "2001:db8::1")
+
+    def test_public_peer_strips_forwarding_headers(self):
+        e = self.run_mw("198.51.100.20", cf=REAL, xff=RENDER_XFF)
+        self.assertEqual(e["REMOTE_ADDR"], "198.51.100.20")
+        self.assertEqual(e["wsgi.url_scheme"], "http")
+        for k in ("HTTP_CF_CONNECTING_IP", "HTTP_X_FORWARDED_FOR", "HTTP_X_FORWARDED_PROTO"):
+            self.assertNotIn(k, e)
+
+    def test_trusted_peer_ranges(self):
+        trusted = ("127.0.0.1", "::1", "10.24.3.4", "172.16.0.1", "172.31.255.1", "192.168.1.1")
+        untrusted = ("172.15.0.1", "172.32.0.1", "172.68.10.20", "100.64.0.1", "169.254.1.1",
+                     "8.8.8.8", "", "junk")
+        for p in trusted:
+            self.assertTrue(app_module.is_trusted_peer(p), p)
+        for p in untrusted:
+            self.assertFalse(app_module.is_trusted_peer(p), p)
 
 
 if __name__ == "__main__":
