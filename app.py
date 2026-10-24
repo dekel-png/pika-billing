@@ -94,7 +94,8 @@ def record_failure(ip: str) -> int:
 def security_log(event: str, ip: str, **fields) -> None:
     """שורת לוג אחת ל-stdout (נאסף ע"י Render). לעולם לא מעבירים לכאן סיסמה או סוד."""
     safe_ip = re.sub(r"[^0-9A-Fa-f:.]", "", ip)[:64] or "?"
-    extra = "".join(f" {k}={v}" for k, v in fields.items())
+    extra = "".join(f" {k}={re.sub(r'[^0-9A-Za-z_.:-]', '', str(v))[:64]}"
+                    for k, v in fields.items())
     print(f"{now_il().isoformat(timespec='seconds')} {event} ip={safe_ip}{extra}", flush=True)
 
 
