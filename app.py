@@ -9,7 +9,7 @@ app.py — מערכת החיובים של ג.ד. פיקה הולדינגס בע"
 CSRF על כל POST, האטת כניסות כושלות (מפתוח לפי IP אמיתי מאחורי פרוקסי Render —
 הלקח מתקרית הדשבורד 16/08), סשן חתום, אין סודות בקוד.
 הקשחה 21/10/2026: כותרות אבטחה על כל תגובה (HSTS, מסגור אסור, CSP בסיסי, nosniff,
-Referrer-Policy, no-store), ProxyFix כך ש-remote_addr הוא ה-IP האמיתי (גם בלוגים),
+Referrer-Policy, no-store), remote_addr = ה-IP האמיתי של הלקוח (behind_proxy, גם בלוגים),
 ושורת לוג על כל ניסיון כניסה (login_failed / login_locked / login_blocked / login_ok) —
 בלי הסיסמה שהוקלדה.
 """
@@ -22,6 +22,7 @@ import csv
 import hmac
 import time
 import uuid
+import ipaddress
 import threading
 import urllib.request
 import urllib.parse
@@ -39,11 +40,57 @@ try:
 except Exception:
     IL_TZ = None
 
+_RFC1918 = tuple(ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+
+
+def valid_ip(value) -> str | None:
+    """הכתובת בצורה מנורמלת, או None אם זה בכלל לא IP (כולל רשימה מופרדת בפסיקים)."""
+    try:
+        return str(ipaddress.ip_address((value or "").strip().strip("[]")))
+    except ValueError:
+        return None
+
+
+def is_trusted_peer(peer: str) -> bool:
+    """loopback או RFC1918 — כלומר פרוקסי שאנחנו יושבים מאחוריו (ב-Render: הפרוקסי שבתוך
+    הקונטיינר, 127.0.0.1, וה-hops הפנימיים 10.x). לא CGNAT 100.64/10 ולא link-local."""
+    ip = valid_ip(peer)
+    if ip is None:
+        return False
+    addr = ipaddress.ip_address(ip)
+    return addr.is_loopback or (addr.version == 4 and any(addr in n for n in _RFC1918))
+
+
+def behind_proxy(wsgi_app):
+    """remote_addr = ה-IP האמיתי של הלקוח, ו-https מאחורי הפרוקסי.
+
+    נמדד ב-staging של הדשבורד 25/10: ב-Render (ש-Cloudflare הוא הקצה שלו, גם ל-*.onrender.com)
+    העמית הוא 127.0.0.1/10.x ו-X-Forwarded-For = "[מה שהלקוח שלח…], לקוח, Cloudflare 172.68.x,
+    Render-פנימי 10.24.x" — ה-hop האחרון משותף לכולם (מונה האטה אחד לכל העולם). לכן:
+    - עמית loopback/פרטי: ה-IP מ-CF-Connecting-IP (Cloudflare קובע אותו ודוחה ב-403 עותק
+      שהלקוח שולח); רק אם הוא חסר/לא תקין — ה-hop האחרון ב-XFF (ProxyFix x_for=1).
+    - עמית ציבורי (גישה ישירה, בלי פרוקסי): כותרות ההעברה נמחקות ולא משפיעות.
+    gunicorn לא נוגע ב-REMOTE_ADDR ולא מוחק את XFF / CF-Connecting-IP; forwarded_allow_ips
+    (ברירת מחדל 127.0.0.1) משפיע רק על זיהוי ה-scheme, ו-header_map=drop זורק שמות כותרת עם "_"
+    (כך ש-CF_Connecting_IP מזויף לא מתמזג לאותו מפתח). הפרוטוקול: ProxyFix x_proto=1."""
+    by_last_hop = ProxyFix(wsgi_app, x_for=1, x_proto=1)
+    proto_only = ProxyFix(wsgi_app, x_for=0, x_proto=1)
+
+    def middleware(environ, start_response):
+        if not is_trusted_peer(environ.get("REMOTE_ADDR") or ""):
+            for k in ("HTTP_X_FORWARDED_FOR", "HTTP_X_FORWARDED_PROTO", "HTTP_CF_CONNECTING_IP"):
+                environ.pop(k, None)
+            return wsgi_app(environ, start_response)
+        cf = valid_ip(environ.get("HTTP_CF_CONNECTING_IP"))
+        if cf:
+            environ["REMOTE_ADDR"] = cf
+            return proto_only(environ, start_response)
+        return by_last_hop(environ, start_response)
+    return middleware
+
+
 app = Flask(__name__)
-# Render (ו-Cloudflare לפניו) מוסיף את ה-IP האמיתי כ-hop האחרון ב-X-Forwarded-For;
-# x_for=1 לוקח רק אותו (ערכים מוקדמים יותר נשלטים ע"י הלקוח ולכן לא אמינים).
-# כך request.remote_addr = ה-IP האמיתי — להאטת הכניסות ולשורות הלוג.
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
+app.wsgi_app = behind_proxy(app.wsgi_app)
 app.secret_key = os.getenv("SECRET_KEY", "")
 if not app.secret_key:
     # בלי מפתח סשן אין התחברות בטוחה — נופלים למפתח אקראי (סשנים יתאפסו ברענון תהליך)
@@ -61,9 +108,18 @@ APP_NAME = "מערכת חיובים — ג.ד. פיקה"
 PENDING: dict[str, dict] = {}     # token -> {rows, bad, filename, month, ts}
 RUNS: dict[str, engine.RunState] = {}
 _RUNS_LOCK = threading.Lock()
-_FAILED_LOGINS: dict[str, list] = {}   # ip -> [timestamps]
-LOGIN_MAX_FAILURES = 15                 # ניסיונות כושלים לכל IP...
+_FAILED_LOGINS: dict[str, list] = {}   # throttle_key(ip) / "*" -> [timestamps]
+LOGIN_MAX_FAILURES = 15                 # ניסיונות כושלים לכל IP (IPv6: לכל ‎/64)...
 LOGIN_WINDOW_SEC = 900                  # ...בחלון של רבע שעה
+# בלם אחרון נגד ניחוש מבוזר (הרבה כתובות): כישלונות מכל הכתובות יחד. לא חל על דפדפן שכבר
+# נכנס בהצלחה (עוגיית "מכשיר מוכר" חתומה) — כך תוקף לא נועל את מנהל החיובים מחוץ למערכת.
+# אותו מודל כמו בלם שם-המשתמש בדשבורד (PR #26).
+LOGIN_GLOBAL_MAX = 50
+_GLOBAL_KEY = "*"
+_GC_AT = 1000                           # ניקוי מפתחות רדומים כשהטבלה גדלה מעבר לזה
+KNOWN_COOKIE = "pb_known_device"
+KNOWN_MAX_AGE = 180 * 24 * 3600
+_GLOBAL_ALERT = {"ts": 0.0}             # התראת טלגרם על הבלם הכללי — לכל היותר אחת לחלון
 
 
 # ------------------------------------------------------------------ עזרים
@@ -73,22 +129,70 @@ def now_il():
 
 
 def client_ip() -> str:
-    """ה-IP האמיתי מאחורי פרוקסי Render. ProxyFix (x_for=1) כבר הציב ב-remote_addr את
-    ה-hop האחרון ב-XFF — זה שהפרוקסי של Render הוסיף, ולכן חסין זיוף."""
+    """ה-IP האמיתי של הלקוח — behind_proxy כבר הציב אותו ב-remote_addr (מ-CF-Connecting-IP
+    מאחורי הפרוקסי של Render; ה-hops שהלקוח שולח ב-XFF לא נחשבים)."""
     return request.remote_addr or "?"
 
 
-def login_throttled(ip: str) -> bool:
-    window = [t for t in _FAILED_LOGINS.get(ip, []) if time.time() - t < LOGIN_WINDOW_SEC]
-    _FAILED_LOGINS[ip] = window
-    return len(window) >= LOGIN_MAX_FAILURES
+def throttle_key(ip: str) -> str:
+    """מפתח ההאטה לכתובת: IPv4 כמו שהיא, IPv6 לפי ‎/64 (מכונה אחת מחזיקה בדרך כלל ‎/64 שלם)."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if addr.version == 6:
+        if addr.ipv4_mapped:
+            return str(addr.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False))
+    return str(addr)
 
 
-def record_failure(ip: str) -> int:
-    """רושם כישלון ומחזיר את מספר הכישלונות של ה-IP בחלון הנוכחי."""
-    hits = _FAILED_LOGINS.setdefault(ip, [])
-    hits.append(time.time())
-    return len(hits)
+def _hits(key: str, now: float) -> list:
+    """הכישלונות של המפתח בחלון הנוכחי; מפתח שהתרוקן נמחק מהטבלה."""
+    hits = [t for t in _FAILED_LOGINS.get(key, []) if now - t < LOGIN_WINDOW_SEC]
+    if hits:
+        _FAILED_LOGINS[key] = hits
+    else:
+        _FAILED_LOGINS.pop(key, None)
+    return hits
+
+
+def login_throttled(ip: str, known_device: bool = False) -> str | None:
+    """איזה בלם סגור: "ip" (הכתובת הזאת), "global" (כולם יחד, רק לדפדפן לא מוכר) או None."""
+    now = time.time()
+    if len(_hits(throttle_key(ip), now)) >= LOGIN_MAX_FAILURES:
+        return "ip"
+    if not known_device and len(_hits(_GLOBAL_KEY, now)) >= LOGIN_GLOBAL_MAX:
+        return "global"
+    return None
+
+
+def record_failure(ip: str) -> tuple[int, int]:
+    """רושם כישלון; מחזיר (כישלונות הכתובת, כישלונות כולם) בחלון הנוכחי."""
+    now = time.time()
+    if len(_FAILED_LOGINS) > _GC_AT:
+        for k in list(_FAILED_LOGINS):
+            _hits(k, now)
+    key = throttle_key(ip)
+    _FAILED_LOGINS.setdefault(key, []).append(now)
+    _FAILED_LOGINS.setdefault(_GLOBAL_KEY, []).append(now)
+    return len(_FAILED_LOGINS[key]), len(_FAILED_LOGINS[_GLOBAL_KEY])
+
+
+def _known_signer():
+    from itsdangerous import URLSafeTimedSerializer
+    return URLSafeTimedSerializer(app.secret_key, salt="login-known-device")
+
+
+def is_known_device() -> bool:
+    """הדפדפן הזה כבר נכנס בהצלחה (עוגייה חתומה במפתח הסשן; זיוף/פג תוקף = לא מוכר)."""
+    raw = request.cookies.get(KNOWN_COOKIE)
+    if not raw:
+        return False
+    try:
+        return _known_signer().loads(raw, max_age=KNOWN_MAX_AGE) == 1
+    except Exception:
+        return False
 
 
 def security_log(event: str, ip: str, **fields) -> None:
@@ -179,8 +283,12 @@ def login():
     if request.method == "POST":
         check_csrf()
         ip = client_ip()
-        if login_throttled(ip):
-            security_log("login_blocked", ip, attempts=len(_FAILED_LOGINS.get(ip, [])))
+        known = is_known_device()
+        brake = login_throttled(ip, known)
+        if brake:
+            security_log("login_blocked", ip, scope=brake, known=int(known),
+                         attempts=len(_FAILED_LOGINS.get(
+                             throttle_key(ip) if brake == "ip" else _GLOBAL_KEY, [])))
             error = "יותר מדי ניסיונות. לנסות שוב בעוד רבע שעה."
         else:
             pw = request.form.get("password", "")
@@ -195,13 +303,25 @@ def login():
                 session.clear()
                 session["role"] = role
                 session["_csrf"] = uuid.uuid4().hex
-                security_log("login_ok", ip, role=role)
-                return redirect(url_for("dashboard"))
-            attempts = record_failure(ip)
-            security_log("login_failed", ip, attempts=attempts)
-            if attempts >= LOGIN_MAX_FAILURES:
-                security_log("login_locked", ip, attempts=attempts,
+                security_log("login_ok", ip, role=role, known=int(known))
+                resp = redirect(url_for("dashboard"))
+                resp.set_cookie(KNOWN_COOKIE, _known_signer().dumps(1), max_age=KNOWN_MAX_AGE,
+                                httponly=True, samesite="Lax",
+                                secure=app.config["SESSION_COOKIE_SECURE"])
+                return resp
+            attempts, total = record_failure(ip)
+            security_log("login_failed", ip, attempts=attempts, total=total, known=int(known))
+            if attempts == LOGIN_MAX_FAILURES:
+                security_log("login_locked", ip, scope="ip", attempts=attempts,
                              minutes=LOGIN_WINDOW_SEC // 60)
+            if total == LOGIN_GLOBAL_MAX:
+                security_log("login_locked", ip, scope="global", attempts=total,
+                             minutes=LOGIN_WINDOW_SEC // 60)
+                if time.time() - _GLOBAL_ALERT["ts"] >= LOGIN_WINDOW_SEC:
+                    _GLOBAL_ALERT["ts"] = time.time()
+                    threading.Thread(target=notify_telegram, daemon=True, args=(
+                        f"⚠ מערכת החיובים: {total} כניסות כושלות ברבע שעה מכל הכתובות — "
+                        "הכניסה נחסמה לדפדפנים לא מוכרים לרבע שעה (דפדפן שכבר נכנס — עובד כרגיל).",)).start()
             time.sleep(1)
             error = "סיסמה שגויה"
     return render_template("login.html", error=error)
