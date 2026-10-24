@@ -246,5 +246,115 @@ class HealthTests(_Base):
         self.assertEqual(r.get_json()["channel"], "twilio")
 
 
+class SecurityHeadersTests(_Base):
+    """הקשחה 21/10/2026: כותרות אבטחה על כל תגובה."""
+
+    def assert_base_headers(self, r):
+        self.assertEqual(r.headers.get("Strict-Transport-Security"), "max-age=31536000; includeSubDomains")
+        self.assertEqual(r.headers.get("X-Frame-Options"), "DENY")
+        self.assertEqual(r.headers.get("X-Content-Type-Options"), "nosniff")
+        csp = r.headers.get("Content-Security-Policy", "")
+        for directive in ("frame-ancestors 'none'", "object-src 'none'", "base-uri 'self'", "form-action 'self'"):
+            self.assertIn(directive, csp)
+        self.assertNotIn("script-src", csp)     # JS משובץ ב-run.html חייב להמשיך לעבוד
+        self.assertEqual(r.headers.get("Cache-Control"), "no-store")
+
+    def test_login_page(self):
+        r = self.client.get("/login")
+        self.assertEqual(r.status_code, 200)
+        self.assert_base_headers(r)
+        self.assertEqual(r.headers.get("Referrer-Policy"), "same-origin")
+
+    def test_authenticated_page(self):
+        self.login()
+        self.patch(engine, "gi_token", lambda: {})
+        self.patch(engine, "gi_verify_business", lambda h: "ok")
+        self.patch(engine, "gi_billed_phones", lambda h, m: set())
+        r = self.client.get("/")
+        self.assertEqual(r.status_code, 200)
+        self.assert_base_headers(r)
+
+    def test_token_links_send_no_referrer(self):
+        self.patch(engine, "gi_doc_url", lambda headers, doc_id: "https://www.greeninvoice.co.il/ok")
+        r = self.client.get("/d/" + engine.short_token(DOC))
+        self.assertEqual(r.status_code, 302)
+        self.assert_base_headers(r)
+        self.assertEqual(r.headers.get("Referrer-Policy"), "no-referrer")
+        self.login()
+        r = self.client.get("/preview/no-such-token")
+        self.assertEqual(r.headers.get("Referrer-Policy"), "no-referrer")
+
+    def test_errors_get_headers_too(self):
+        r = self.client.get("/d/short")
+        self.assertEqual(r.status_code, 404)
+        self.assert_base_headers(r)
+        self.assertEqual(r.headers.get("Referrer-Policy"), "no-referrer")
+
+
+class LoginLogTests(_Base):
+    """כל ניסיון כניסה נרשם ל-stdout עם ה-IP האמיתי (ה-hop האחרון ב-XFF) — לעולם לא הסיסמה."""
+    PW = "wrong-pass-Zq9"
+
+    def setUp(self):
+        super().setUp()
+        import time as _time
+        self.patch(_time, "sleep", lambda s: None)      # ההשהיה של כישלון — לא בבדיקות
+        self.patch(app_module, "_FAILED_LOGINS", {})
+        self._env = {k: os.environ.get(k) for k in ("ADMIN_PASSWORD", "MANAGER_PASSWORD")}
+        os.environ["ADMIN_PASSWORD"] = "admin-test-pw"
+        os.environ["MANAGER_PASSWORD"] = "manager-test-pw"
+
+    def tearDown(self):
+        for k, v in self._env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        super().tearDown()
+
+    def post_login(self, password, xff="198.51.100.7, 203.0.113.9"):
+        import contextlib
+        import io as _io
+        with self.client.session_transaction() as s:
+            s["_csrf"] = "csrf-test"
+        out = _io.StringIO()
+        with contextlib.redirect_stdout(out):
+            r = self.client.post("/login", data={"_csrf": "csrf-test", "password": password},
+                                 headers={"X-Forwarded-For": xff})
+        return r, out.getvalue()
+
+    def test_failed_login_logged_with_real_ip_and_no_password(self):
+        r, log = self.post_login(self.PW)
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("login_failed ip=203.0.113.9 attempts=1", log)
+        self.assertNotIn("198.51.100.7", log)      # hop שהלקוח שלט בו — לא נחשב
+        self.assertNotIn(self.PW, log)
+        self.assertEqual(list(app_module._FAILED_LOGINS), ["203.0.113.9"])
+
+    def test_lockout_logged_and_blocks(self):
+        log = ""
+        for _ in range(app_module.LOGIN_MAX_FAILURES):
+            _, out = self.post_login(self.PW)
+            log += out
+        self.assertIn(f"login_failed ip=203.0.113.9 attempts={app_module.LOGIN_MAX_FAILURES}", log)
+        self.assertEqual(log.count("login_locked"), 1)
+        r, out = self.post_login("admin-test-pw")        # גם סיסמה נכונה חסומה בזמן הנעילה
+        self.assertIn("login_blocked ip=203.0.113.9", out)
+        self.assertNotIn("login_ok", out)
+        self.assertNotIn("admin-test-pw", out)
+        self.assertEqual(r.status_code, 200)
+        # IP אחר לא מושפע מהנעילה
+        r, out = self.post_login("manager-test-pw", xff="203.0.113.50")
+        self.assertEqual(r.status_code, 302)
+        self.assertIn("login_ok ip=203.0.113.50 role=manager", out)
+
+    def test_success_logged_without_password(self):
+        r, log = self.post_login("admin-test-pw")
+        self.assertEqual(r.status_code, 302)
+        self.assertIn("login_ok ip=203.0.113.9 role=admin", log)
+        self.assertNotIn("admin-test-pw", log)
+        self.assertNotIn("login_failed", log)
+
+
 if __name__ == "__main__":
     unittest.main()
